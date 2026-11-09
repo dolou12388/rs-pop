@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Decisive Selection Test</title>
+<style>
+  body { font-family: "Microsoft YaHei UI", sans-serif; margin: 50px; background:#fff; color:#111; }
+  #p { font-size: 20px; line-height: 2; max-width: 720px; }
+  #s { margin-top: 24px; font-size: 14px; color:#0a0; }
+  #box { margin-top: 20px; padding: 12px; border:1px solid #ddd; font-size:13px; color:#666; }
+</style>
+</head>
+<body>
+<h1 style="font-size:18px;color:#555">确定性选区实验页</h1>
+<p id="p">DECISIVE_SELECTION_MARKER 这是一段用于验证 Chromium 剪贴板取词可靠性的文本。</p>
+<div id="s">初始化中...</div>
+<div id="box">窗口标题会变为 SELOK:n，表示选区已就绪。</div>
+
+<script>
+function makeSelection() {
+  const p = document.getElementById('p');
+  const node = p.firstChild;
+  const range = document.createRange();
+  range.setStart(node, 0);
+  range.setEnd(node, 30);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  document.body.focus();
+  const picked = sel.toString();
+  document.getElementById('s').textContent = `已选中 ${picked.length} 字符`;
+  document.title = `SELOK:${picked.length}`;
+  return picked;
+}
+
+window.addEventListener('load', () => {
+  makeSelection();
+  const picked = makeSelection();
+  document.getElementById('box').textContent = `选区内容前 40 字符: ${picked.slice(0,40)}`;
+  setTimeout(makeSelection, 200);
+});
+</script>
+</body>
+</html>

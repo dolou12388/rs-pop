@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>R:init</title>
+<style>
+  html,body { margin:0; padding:0; background:#fff; }
+  body { font-family:"Microsoft YaHei UI",sans-serif; color:#111; }
+  #wrap { padding: 60px 70px; }
+  #p {
+    font-size: 22px; line-height: 2.2; max-width: 640px;
+    margin: 0; letter-spacing: 0.5px;
+  }
+  #p2 {
+    font-size: 22px; line-height: 2.2; max-width: 640px;
+    margin-top: 40px; letter-spacing: 0.5px;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <p id="p">DRAGPROBE_ALPHA 量子纠缠是量子力学中最引人注目的现象之一，它描述两个粒子之间的强关联。</p>
+  <p id="p2">DRAGPROBE_BETA 第二段用来验证多行文本的拖选锚点是否稳定可靠。</p>
+</div>
+
+<script>
+// 把两段文字在屏幕上的精确坐标报告到标题里，供外部脚本在真实文字行上拖选。
+// 格式：R:<dpr>|<p1 x0,y0,x1,y1>|<p2 x0,y0,x1,y1>
+function report() {
+  const r1 = document.getElementById('p').getBoundingClientRect();
+  const r2 = document.getElementById('p2').getBoundingClientRect();
+  const sx = window.screenX, sy = window.screenY;
+  const dpr = window.devicePixelRatio;
+  // 取每段文字的首行中心 y（行高的一半处）
+  const lineH = 22 * 2.2;
+  const y1 = sy + r1.top + lineH / 2;
+  const y2 = sy + r2.top + lineH / 2;
+  const x1a = sx + r1.left + 6;
+  const x1b = sx + r1.right - 6;
+  const x2a = sx + r2.left + 6;
+  const x2b = sx + r2.right - 6;
+  document.title = 'R:' + dpr + '|' +
+    [x1a, y1, x1b, y1].map(Math.round).join(',') + '|' +
+    [x2a, y2, x2b, y2].map(Math.round).join(',');
+  return document.title;
+}
+window.addEventListener('load', () => { setTimeout(report, 120); });
+</script>
+</body>
+</html>

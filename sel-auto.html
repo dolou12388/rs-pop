@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>UIA Selection Auto Test</title>
+<style>
+  body { font-family: "Microsoft YaHei UI", sans-serif; margin: 60px; background:#fff; }
+  #para { font-size: 22px; line-height: 1.9; color:#111; max-width: 760px; }
+  #status { margin-top: 30px; font-size: 15px; color:#0a0; }
+</style>
+</head>
+<body>
+<h1 style="font-size:20px;color:#666">UIA 选区自动化测试页</h1>
+<p id="para">量子纠缠是量子力学中最引人注目的现象之一，它描述了两个或多个粒子之间存在的一种强关联。当这些粒子被分离到很远的地方时，对其中一个粒子的测量会瞬间影响另一个粒子的状态。</p>
+<div id="status">等待建立选区...</div>
+
+<script>
+// 页面加载后自动用 Range 选中第一段的前 30 个字符。
+// 这是真实的 DOM 选区（getSelection 可读），等价于用户拖选。
+window.addEventListener('load', () => {
+  const p = document.getElementById('para');
+  const textNode = p.firstChild;
+  const range = document.createRange();
+  range.setStart(textNode, 0);
+  range.setEnd(textNode, 30);
+
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+
+  // 让 body 获得焦点，帮助 UIA 定位到文档
+  document.body.focus();
+
+  const picked = sel.toString();
+  document.getElementById('status').textContent =
+    `已选中 ${picked.length} 字符：${picked}`;
+
+  // 同时也写进标题，便于窗口枚举时确认
+  document.title = `SEL:${picked.length}`;
+});
+</script>
+</body>
+</html>
