@@ -81,6 +81,52 @@ def test_messages():
           all(x["content"] for x in m5), m5)
 
 
+def test_request_chain():
+    """从窗口发起追问到 AI 请求，验证真正发出的消息次序。"""
+    from unittest.mock import patch
+    import py_pop
+
+    class Store:
+        def readiness(self, key):
+            return True, "就绪"
+
+        def binding(self, key):
+            return {"prompt": "系统提示", "provider": {"model": "test"}}
+
+    class Window:
+        source_text = "最初划选的原文"
+        cancel_event = threading.Event()
+
+        def set_status(self, *args):
+            pass
+
+        def append(self, *args):
+            pass
+
+        def finish(self, *args):
+            pass
+
+        def show_error(self, *args):
+            pass
+
+    captured = {}
+
+    def fake_ask_async(action, text, binding, **kw):
+        captured.update(action=action, text=text, binding=binding, kw=kw)
+
+    with patch.object(py_pop.py_ai, "ask_async", side_effect=fake_ask_async):
+        py_pop.request_ai(Window(), Store(), "search", "这是什么意思？",
+                          [("assistant", "首轮回答")], is_first=False)
+    messages = py_pop.py_ai.build_messages(
+        captured["action"], captured["text"],
+        captured["binding"]["prompt"], captured["kw"]["history"])
+    check("追问携带最初原文", "最初划选的原文" in messages[1]["content"],
+          messages)
+    check("追问放在历史末尾",
+          [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+          and messages[-1]["content"] == "这是什么意思？", messages)
+
+
 # ---------- B. 历史累积与渲染 ----------
 
 def test_window():
@@ -342,6 +388,7 @@ if __name__ == "__main__":
     print("追问功能测试")
     print("=" * 62)
     test_messages()
+    test_request_chain()
     test_window()
     test_ui_contract()
     test_async_chain()

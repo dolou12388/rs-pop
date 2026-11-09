@@ -1130,6 +1130,35 @@ def show_result(root, text, action):
     return w
 
 
+def request_ai(win, store, key, question, history, is_first):
+    """发起首轮或追问；原文始终是对话中的首条用户消息。"""
+    ok, why = store.readiness(key)
+    if not ok:
+        win.show_error(py_ai.AIError("config", why))
+        return
+
+    binding = store.binding(key)
+    win.set_status("请求中…", WARN_COLOR)
+    t0 = time.time()
+    source_text = question if is_first else win.source_text
+    turns = None if is_first else list(history) + [("user", question)]
+
+    def on_done(full):
+        win.finish(full, (time.time() - t0) * 1000)
+
+    try:
+        py_ai.ask_async(
+            key, source_text, binding,
+            on_delta=win.append,
+            on_done=on_done,
+            on_error=win.show_error,
+            cancel_event=win.cancel_event,
+            history=turns,
+        )
+    except Exception as e:
+        win.show_error(py_ai.AIError("internal", f"发起失败：{e}"))
+
+
 class Watcher:
     def __init__(self, root, on_selection, pill=None):
         self.root = root
@@ -1389,32 +1418,6 @@ def main():
     store = py_config.store()
     open_windows = []           # 追踪结果窗口，退出时统一关闭
 
-    def ask_once(win, key, question, history, is_first):
-        """发起（或追问）一次请求。is_first 决定用原文还是追问文本。"""
-        ok, why = store.readiness(key)
-        if not ok:
-            win.show_error(py_ai.AIError("config", why))
-            return
-
-        binding = store.binding(key)
-        win.set_status("请求中…", WARN_COLOR)
-        t0 = time.time()
-
-        def on_done(full):
-            win.finish(full, (time.time() - t0) * 1000)
-
-        try:
-            py_ai.ask_async(
-                key, question, binding,
-                on_delta=win.append,
-                on_done=on_done,
-                on_error=win.show_error,
-                cancel_event=win.cancel_event,
-                history=history if not is_first else None,
-            )
-        except Exception as e:
-            win.show_error(py_ai.AIError("internal", f"发起失败：{e}"))
-
     def run_action(key, text):
         """发起一次 AI 调用，把结果送进结果窗口。"""
         label = {"search": "AI 搜索", "translate": "翻译",
@@ -1423,7 +1426,7 @@ def main():
         def on_ask(question, history):
             """追问回调：由结果窗在用户按下追问时调用。"""
             win.begin_request()
-            ask_once(win, key, question, history, is_first=False)
+            request_ai(win, store, key, question, history, is_first=False)
 
         win = ResultWindow(root, label, text,
                            on_ask=on_ask, action_key=key)
@@ -1431,7 +1434,7 @@ def main():
         open_windows[:] = [w for w in open_windows if not w.closed]
 
         win.begin_request()
-        ask_once(win, key, text, [], is_first=True)
+        request_ai(win, store, key, text, [], is_first=True)
 
     def on_action(key):
         text = pill.payload
