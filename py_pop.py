@@ -433,6 +433,9 @@ class Pill:
         self.win.withdraw()
         self.visible = False
 
+    def apply_theme(self, old, new):
+        py_theme.recolor_tree(self.win, old, new)
+
 
 RESULT_BG = py_theme.BG
 RESULT_BAR = py_theme.BG2
@@ -449,6 +452,18 @@ ACCENT_HOVER = py_theme.ACCENT_HOVER
 OK_COLOR = py_theme.OK_COLOR
 ERR_COLOR = py_theme.ERR_COLOR
 WARN_COLOR = py_theme.WARN_COLOR
+
+
+def _sync_result_colors():
+    globals().update({
+        "RESULT_BG": py_theme.BG, "RESULT_BAR": py_theme.BG2,
+        "RESULT_BODY": py_theme.BG2, "FG_MAIN": py_theme.FG,
+        "FG_SOFT": py_theme.FG_SOFT, "FG_MUTED": py_theme.FG_DIM,
+        "FG_DIM": py_theme.FG_FAINT, "LINE": py_theme.LINE,
+        "ACCENT": py_theme.ACCENT, "ACCENT_HOVER": py_theme.ACCENT_HOVER,
+        "OK_COLOR": py_theme.OK_COLOR, "ERR_COLOR": py_theme.ERR_COLOR,
+        "WARN_COLOR": py_theme.WARN_COLOR,
+    })
 
 
 class _StateLabel:
@@ -572,11 +587,11 @@ class ResultWindow:
         self._bind_keys()
         self._start_pump()
 
-        # DWM 深色标题栏 + 系统圆角。必须在窗口映射之后调用，
+        # DWM 标题栏配色 + 系统圆角。必须在窗口映射之后调用，
         # 否则 HWND 还没真正建立，属性设了也不生效。失败不影响功能。
         try:
             self.win.update_idletasks()
-            py_theme.apply_dark_window(self.win, small_corners=False)
+            py_theme.apply_window(self.win, small_corners=False)
         except Exception:
             pass
 
@@ -628,7 +643,7 @@ class ResultWindow:
                             pady=(py_dpi.px(4), 0))
         self.src_toggle.bind("<Button-1>", lambda e: self._toggle_src())
         self.src_box = tk.Text(
-            self.win, height=3, wrap="word", bg="#1A1A1C", fg=FG_MUTED,
+            self.win, height=3, wrap="word", bg=py_theme.BG3, fg=FG_MUTED,
             font=f_small, relief="flat", padx=py_dpi.px(10),
             pady=py_dpi.px(6), insertbackground=FG_MUTED,
             highlightthickness=0, borderwidth=0)
@@ -637,8 +652,6 @@ class ResultWindow:
 
         # ---- 正文区（带滚动条）----
         body_wrap = tk.Frame(self.win, bg=RESULT_BODY)
-        body_wrap.pack(fill="both", expand=True,
-                       padx=py_dpi.px(10), pady=(py_dpi.px(6), py_dpi.px(4)))
 
         self.body = tk.Text(
             body_wrap, wrap="word", bg=RESULT_BODY, fg=FG_MAIN,
@@ -646,31 +659,34 @@ class ResultWindow:
             padx=py_dpi.px(14), pady=py_dpi.px(12),
             insertbackground=FG_MAIN, highlightthickness=0, borderwidth=0,
             spacing1=py_dpi.px(1), spacing3=py_dpi.px(3),
-            selectbackground="#3A4A6B", selectforeground="#FFFFFF")
+            selectbackground=py_theme.ACCENT_DIM,
+            selectforeground=(py_theme.ON_ACCENT
+                              if py_theme.effective_mode() == "light"
+                              else py_theme.FG))
         self.sb = tk.Scrollbar(
             body_wrap, orient="vertical", command=self.body.yview,
             width=py_dpi.px(11), bg=RESULT_BODY, troughcolor=RESULT_BODY,
             relief="flat", borderwidth=0, highlightthickness=0,
-            activebackground="#4A4A52")
+            activebackground=py_theme.BG4)
         self.body.configure(yscrollcommand=self._on_scroll)
         self.sb.pack(side="right", fill="y")
         self.body.pack(side="left", fill="both", expand=True)
 
         # ---- 追问输入区 ----
-        tk.Frame(self.win, bg=LINE, height=1).pack(fill="x")
+        ask_rule = tk.Frame(self.win, bg=LINE, height=1)
         ask_wrap = tk.Frame(self.win, bg=RESULT_BG)
-        ask_wrap.pack(fill="x", padx=py_dpi.px(10),
-                      pady=(py_dpi.px(6), py_dpi.px(10)))
 
         self.ask_entry = tk.Text(
-            ask_wrap, height=2, wrap="word", bg="#1F1F23", fg=FG_MAIN,
+            ask_wrap, height=2, wrap="word", bg=py_theme.BG3, fg=FG_MAIN,
             font=py_markdown.base_font(10), relief="flat",
             padx=py_dpi.px(10), pady=py_dpi.px(7),
             insertbackground=FG_MAIN, highlightthickness=1,
-            highlightbackground="#3A3A42", highlightcolor="#5A6A8F",
-            borderwidth=0, selectbackground="#3A4A6B")
-        self.ask_entry.pack(side="left", fill="both", expand=True)
-
+            highlightbackground=py_theme.LINE,
+            highlightcolor=py_theme.ACCENT,
+            borderwidth=0, selectbackground=py_theme.ACCENT_DIM,
+            selectforeground=(py_theme.ON_ACCENT
+                              if py_theme.effective_mode() == "light"
+                              else py_theme.FG))
         self.btn_ask = self._flat_button(
             ask_wrap, "追问", self._do_ask, py_markdown.base_font(9),
             accent=True)
@@ -680,6 +696,7 @@ class ResultWindow:
             muted=True)
         self.btn_stop.pack(side="right", fill="y", padx=(py_dpi.px(6), 0))
         self.btn_stop.configure(state="disabled")
+        self.ask_entry.pack(side="left", fill="both", expand=True)
 
         # 空输入时不显示占位文字，但要让用户知道这里能追问
         self._hint_shown = True
@@ -690,6 +707,39 @@ class ResultWindow:
         self.ask_entry.bind("<Return>", self._on_ask_return)
         self.ask_entry.bind("<Shift-Return>", lambda e: None)
 
+        # pack 先分配底部的追问区，再让正文占剩余空间。
+        ask_wrap.pack(side="bottom", fill="x", padx=py_dpi.px(10),
+                      pady=(py_dpi.px(6), py_dpi.px(10)))
+        ask_rule.pack(side="bottom", fill="x")
+        body_wrap.pack(fill="both", expand=True,
+                       padx=py_dpi.px(10), pady=(py_dpi.px(6), py_dpi.px(4)))
+
+    def apply_theme(self, old, new):
+        if self.closed:
+            return
+        py_theme.recolor_tree(self.win, old, new)
+        select_fg = (py_theme.ON_ACCENT
+                     if py_theme.effective_mode() == "light" else py_theme.FG)
+        self.body.configure(selectforeground=select_fg)
+        self.ask_entry.configure(selectforeground=select_fg)
+        for button in (self.btn_close, self.btn_copy, self.btn_md,
+                       self.btn_ask, self.btn_stop):
+            role = button.w._role
+            if role == "accent":
+                button.w._bg = py_theme.ACCENT
+                button.w._active = py_theme.ACCENT_HOVER
+                button._fg = py_theme.ON_ACCENT
+            else:
+                button.w._bg = py_theme.BG2
+                button.w._active = py_theme.BG4
+                button._fg = (py_theme.FG_SOFT if role == "muted"
+                              else py_theme.FG)
+            button._disabled_fg = py_theme.FG_FAINT
+            button.config_state(button.cget("state"))
+        py_markdown.config_tags(self.body, py_markdown.active_palette())
+        self.body.tag_configure("ask_q_tag", foreground=py_theme.ACCENT)
+        py_theme.apply_window(self.win)
+
     def _flat_button(self, parent, text, cmd, font, muted=False,
                      accent=False):
         """统一风格按钮：无边框、悬停变色、按下变色。
@@ -698,17 +748,18 @@ class ResultWindow:
         会带一圈浅色边框和小阴影，与扁平卡片风格冲突。
         """
         if accent:
-            bg, fg, active = ACCENT, "#10131A", ACCENT_HOVER
+            bg, fg, active = ACCENT, py_theme.ON_ACCENT, ACCENT_HOVER
         elif muted:
-            bg, fg, active = RESULT_BAR, FG_SOFT, "#3A3A44"
+            bg, fg, active = RESULT_BAR, FG_SOFT, py_theme.BG4
         else:
-            bg, fg, active = RESULT_BAR, FG_MAIN, "#3A3A44"
+            bg, fg, active = RESULT_BAR, FG_MAIN, py_theme.BG4
 
         lb = tk.Label(parent, text=text, bg=bg, fg=fg, font=font,
                       padx=py_dpi.px(12), pady=py_dpi.px(5),
                       cursor="hand2", takefocus=0)
         lb._active = active
         lb._bg = bg
+        lb._role = "accent" if accent else ("muted" if muted else "normal")
 
         def on_enter(e):
             if str(getattr(lb, "_enabled", True)):
@@ -788,18 +839,18 @@ class ResultWindow:
     def _do_ask(self):
         """发起追问。"""
         if self._busy:
-            self._set_status_now("上一轮还在进行中…", "#D9A441")
+            self._set_status_now("上一轮还在进行中…", WARN_COLOR)
             return
         q = self.ask_text()
         if not q:
-            self._set_status_now("请输入追问内容", "#D9A441")
+            self._set_status_now("请输入追问内容", WARN_COLOR)
             try:
                 self.ask_entry.focus_set()
             except tk.TclError:
                 pass
             return
         if self.on_ask is None:
-            self._set_status_now("当前窗口不支持追问", "#D9534F")
+            self._set_status_now("当前窗口不支持追问", ERR_COLOR)
             return
 
         self._clear_ask()
@@ -819,7 +870,7 @@ class ResultWindow:
             self._busy = False
             self.btn_ask.config_state("normal")
             self.btn_stop.config_state("disabled")
-            self._set_status_now(f"发起失败：{e}", "#D9534F")
+            self._set_status_now(f"发起失败：{e}", ERR_COLOR)
 
     def _begin_turn(self, question):
         """在正文末尾插入追问的分隔与问题回显。"""
@@ -833,7 +884,7 @@ class ResultWindow:
         start = tw.index("end-1c")
         tw.insert("end", "❯ 你问：", "ask_q_tag")
         tw.insert("end", question + "\n\n", "ask_q_tag")
-        tw.tag_configure("ask_q_tag", foreground="#8FA8D8",
+        tw.tag_configure("ask_q_tag", foreground=py_theme.ACCENT,
                          font=py_markdown.base_font(9, italic=True),
                          lmargin1=0, lmargin2=0,
                          spacing1=py_dpi.px(4), spacing3=py_dpi.px(2))
@@ -855,7 +906,7 @@ class ResultWindow:
             self._busy = False
         self.btn_ask.config_state("normal")
         self.btn_stop.config_state("disabled")
-        self._set_status_now("已停止", "#D9A441")
+        self._set_status_now("已停止", WARN_COLOR)
 
     # ---------- 跨线程泵 ----------
 
@@ -992,7 +1043,7 @@ class ResultWindow:
                 self.body.insert("end", text)
             except tk.TclError:
                 pass
-            self._set_status_now(f"渲染失败，已显示原文：{e}", "#D9534F")
+            self._set_status_now(f"渲染失败，已显示原文：{e}", ERR_COLOR)
             return
         self.rendered = True
         try:
@@ -1423,6 +1474,10 @@ def main():
     # 2560x1600/144DPI）—— 文字是插值放大出来的，必然发虚。
     py_dpi.enable(verbose=bool(os.environ.get("RSPOP_DEBUG_DPI")))
 
+    store = py_config.store()
+    py_theme.set_mode(store.raw["ui"]["theme_mode"])
+    _sync_result_colors()
+
     root = tk.Tk()
     root.withdraw()
     py_dpi.set_tk_scaling(root)
@@ -1441,8 +1496,20 @@ def main():
 
     pill = Pill(root, on_action=None)
 
-    store = py_config.store()
     open_windows = []           # 追踪结果窗口，退出时统一关闭
+    applied_palette = py_theme.colors()
+
+    def apply_theme():
+        nonlocal applied_palette
+        current = py_theme.colors()
+        if current == applied_palette:
+            return
+        old = applied_palette
+        _sync_result_colors()
+        pill.apply_theme(old, current)
+        for result in open_windows:
+            result.apply_theme(old, current)
+        applied_palette = current
 
     def run_action(key, text):
         """发起一次 AI 调用，把结果送进结果窗口。"""
@@ -1484,10 +1551,14 @@ def main():
 
     def open_settings():
         import py_settings
-        py_settings.open_settings(store, on_saved=store.load, wait=False)
+        py_settings.open_settings(store,
+                                  on_saved=lambda: events.put("theme"),
+                                  wait=False)
 
     def reload_config():
         store.load()
+        py_theme.set_mode(store.raw["ui"]["theme_mode"])
+        apply_theme()
         ok, why = store.readiness("search")
         if tray:
             tray.notify("配置已重载",
@@ -1514,6 +1585,8 @@ def main():
                     open_settings()
                 elif name == "reload":
                     reload_config()
+                elif name == "theme":
+                    apply_theme()
                 elif name == "open_dir":
                     open_config_dir()
                 elif name == "about":
@@ -1536,6 +1609,13 @@ def main():
         tray = None
 
     root.after(120, pump_events)
+
+    def poll_system_theme():
+        if py_theme.refresh_system():
+            apply_theme()
+        root.after(1000, poll_system_theme)
+
+    root.after(1000, poll_system_theme)
 
     print("=" * 66)
     print("Windows 全局划词 —— 三级降级取词 + 剪贴板不污染")

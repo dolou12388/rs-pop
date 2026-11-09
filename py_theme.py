@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""视觉主题：统一配色 + 圆角 + 深色标题栏 + 柔和阴影。
+"""视觉主题：深浅配色、系统跟随、标题栏与圆角。
 
 ## 为什么单独一个模块
 
@@ -18,13 +18,16 @@ Windows 11（build 22000+）的 DWM 提供 `DWMWA_WINDOW_CORNER_PREFERENCE`，
      该属性对它无效。浮层因此改用 alpha 合成的圆角底图（见 pill_round_rect）。
   2. 属性必须在窗口**已映射**（有 HWND 且可见）之后设置才稳定生效。
 
-## 深色标题栏
+## 标题栏
 
 `DWMWA_USE_IMMERSIVE_DARK_MODE`（属性号 20，旧版 19）能让原生标题栏
-变深色。不设的话，深色界面配一条白色标题栏会很割裂。
+跟随当前配色。深色界面如果保留白色标题栏会很割裂。
 """
 
 import ctypes
+import threading
+import tkinter as tk
+import winreg
 from ctypes import wintypes as wt
 
 dwmapi = ctypes.WinDLL("dwmapi.dll", use_last_error=True)
@@ -81,6 +84,77 @@ ON_ACCENT = "#0C1020"   # 主色上的文字
 OK_COLOR = "#5CB574"
 WARN_COLOR = "#E0A94A"
 ERR_COLOR = "#E0645C"
+
+_COLOR_NAMES = (
+    "BG", "BG2", "BG3", "BG4", "FG", "FG_SOFT", "FG_DIM", "FG_FAINT",
+    "LINE", "LINE_SOFT", "ACCENT", "ACCENT_HOVER", "ACCENT_DIM",
+    "ON_ACCENT", "OK_COLOR", "WARN_COLOR", "ERR_COLOR",
+)
+DARK_PALETTE = {name: globals()[name] for name in _COLOR_NAMES}
+LIGHT_PALETTE = {
+    "BG": "#F6F4EF", "BG2": "#FFFEFB", "BG3": "#F0EFE9",
+    "BG4": "#E5E9E2", "FG": "#202723", "FG_SOFT": "#4B5650",
+    "FG_DIM": "#67736C", "FG_FAINT": "#89928B",
+    "LINE": "#D9D8D1", "LINE_SOFT": "#ECEAE4",
+    "ACCENT": "#2F7058", "ACCENT_HOVER": "#3C8469",
+    "ACCENT_DIM": "#245942", "ON_ACCENT": "#FFFFFF",
+    "OK_COLOR": "#36865D", "WARN_COLOR": "#A86D21",
+    "ERR_COLOR": "#B84B46",
+}
+THEME_MODES = ("system", "light", "dark")
+_mode_lock = threading.RLock()
+_preference = "dark"
+_effective = "dark"
+
+
+def system_mode():
+    """读取 Windows 的应用深浅色选择；缺失时采用系统默认浅色。"""
+    try:
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return "light" if int(value) else "dark"
+    except (OSError, TypeError, ValueError):
+        return "light"
+
+
+def set_mode(mode):
+    """设置首选模式并更新模块配色，返回实际生效的深浅色。"""
+    global _preference, _effective
+    if mode not in THEME_MODES:
+        raise ValueError(f"未知主题模式: {mode}")
+    effective = system_mode() if mode == "system" else mode
+    with _mode_lock:
+        _preference, _effective = mode, effective
+        palette = LIGHT_PALETTE if effective == "light" else DARK_PALETTE
+        globals().update(palette)
+    return effective
+
+
+def refresh_system():
+    """跟随系统时检测颜色变化；仅在实际变化时返回 True。"""
+    global _effective
+    with _mode_lock:
+        if _preference != "system":
+            return False
+        effective = system_mode()
+        if effective == _effective:
+            return False
+        _effective = effective
+        globals().update(LIGHT_PALETTE if effective == "light" else DARK_PALETTE)
+        return True
+
+
+def effective_mode():
+    with _mode_lock:
+        return _effective
+
+
+def preference():
+    with _mode_lock:
+        return _preference
 
 # 阴影：alpha 合成的纯黑，直接叠在父窗口的圆角底图外侧
 
@@ -149,6 +223,18 @@ def dark_titlebar(win):
     return False
 
 
+def titlebar_mode(win):
+    """让系统标题栏与当前主题一致。"""
+    hwnd = _hwnd_of(win)
+    want = int(effective_mode() == "dark")
+    for attr in (DWMWA_USE_IMMERSIVE_DARK_MODE,
+                 DWMWA_USE_IMMERSIVE_DARK_MODE_OLD):
+        if _set_dwm_attr(hwnd, attr, want):
+            if _get_dwm_attr(hwnd, attr) == want:
+                return True
+    return False
+
+
 def round_corners(win, small=False):
     """让系统给窗口画圆角。对 override 的无边框窗口无效（见模块说明）。"""
     hwnd = _hwnd_of(win)
@@ -192,6 +278,14 @@ def apply_dark_window(win, small_corners=False, border=LINE):
     return ok_dark, ok_round
 
 
+def apply_window(win, small_corners=False):
+    """给原生窗口应用当前标题栏、圆角和边线颜色。"""
+    titlebar_mode(win)
+    rounded = round_corners(win, small=small_corners)
+    tint_border(win, LINE)
+    return rounded
+
+
 # ---------- 无边框窗口的圆角底图 ----------
 
 def rounded_rect_points(x0, y0, x1, y1, r, steps=8):
@@ -219,9 +313,31 @@ def rounded_rect_points(x0, y0, x1, y1, r, steps=8):
 
 
 def colors():
-    """返回一份配色副本，方便调试或未来做浅色主题。"""
-    return {k: v for k, v in globals().items()
-            if k.isupper() and isinstance(v, str) and v.startswith("#")}
+    """返回当前生效配色的副本。"""
+    with _mode_lock:
+        return {name: globals()[name] for name in _COLOR_NAMES}
+
+
+def recolor_tree(widget, old, new):
+    """原位换色，保留窗口中尚未保存的输入与滚动位置。"""
+    mapping = {value.lower(): new[name] for name, value in old.items()}
+    options = ("background", "foreground", "activebackground",
+               "activeforeground", "highlightbackground", "highlightcolor",
+               "insertbackground", "selectbackground", "selectforeground",
+               "troughcolor", "disabledforeground")
+
+    def visit(item):
+        for option in options:
+            try:
+                value = item.cget(option)
+                target = mapping.get(str(value).lower())
+                if target:
+                    item.configure(**{option: target})
+            except (tk.TclError, TypeError, AttributeError):
+                pass
+        for child in item.winfo_children():
+            visit(child)
+    visit(widget)
 
 
 # ---------- 无边框浮层的圆角 ----------

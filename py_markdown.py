@@ -18,6 +18,7 @@ import re
 import unicodedata
 
 import py_dpi
+import py_theme
 
 # ---------- 配色 ----------
 
@@ -38,6 +39,18 @@ DARK = {
     "com": "#6A737D",
     "fn": "#82AAFF",
 }
+
+LIGHT = {
+    "bg": "#FFFEFB", "fg": "#202723", "head": "#1D3025",
+    "muted": "#67736C", "accent": "#2F7058", "code_bg": "#F0EFE9",
+    "code_fg": "#4D493A", "rule": "#D9D8D1",
+    "quote_fg": "#52665A", "kw": "#78499B", "str": "#356E36",
+    "num": "#A64D31", "com": "#738078", "fn": "#256B86",
+}
+
+
+def active_palette():
+    return LIGHT if py_theme.effective_mode() == "light" else DARK
 
 # 字体族在运行时按系统实际情况挑选（见 py_markdown.init_fonts）
 BASE_FAMILY = "Microsoft YaHei UI"
@@ -625,7 +638,7 @@ def _render_blocks(tw, md_text):
 
 def render(tw, md_text, palette=None, tf=None):
     """渲染 Markdown 到 Text 控件（会先清空）。"""
-    p = dict(DARK)
+    p = dict(active_palette())
     if palette:
         p.update(palette)
     config_tags(tw, p)
@@ -648,7 +661,7 @@ def render_into(tw, md_text, start_mark):
     实现上仍然先删掉 start_mark 之后的内容再重写 ——
     因为流式阶段那里存的是纯文本，必须整体替换成富文本。
     """
-    p = dict(DARK)
+    p = dict(active_palette())
     config_tags(tw, p)
     was = tw.cget("state")
     tw.configure(state="normal")

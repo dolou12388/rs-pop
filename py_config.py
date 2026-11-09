@@ -129,6 +129,7 @@ def default_config():
         "ui": {
             "pill_ttl_ms": 9000,
             "min_drag_px": 4,
+            "theme_mode": "system",
         },
     }
 
@@ -266,6 +267,8 @@ class ConfigStore:
             ui = {}
         ui.setdefault("pill_ttl_ms", 9000)
         ui.setdefault("min_drag_px", 4)
+        if ui.get("theme_mode") not in ("system", "light", "dark"):
+            ui["theme_mode"] = "system"
         cfg["ui"] = ui
 
     # ---------- 供应商 ----------

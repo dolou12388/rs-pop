@@ -22,6 +22,7 @@ Windows 全局划词弹窗：鼠标拖选任意文字，浮层即出现在选区
 - **多轮追问**：历史按正确顺序注入，首轮回答也进上下文
 - **高 DPI 清晰**：显式声明 Per-Monitor V2 感知，文字按真实 DPI 重新栅格化，不是被拉伸放大
 - **系统托盘常驻**：右键进入设置或退出，设置界面可配 AI 供应商与 API Key
+- **双主题**：设置中可选跟随系统、浅色或深色；已打开的浮层和结果窗会同步换色
 - **零第三方依赖**：只用 `ctypes` + `tkinter` + 标准库，`pip install` 什么都不用装
 
 ---
@@ -69,6 +70,8 @@ py -3 -c "import tkinter; print('OK', tkinter.TkVersion)"
 2. 选一个预设（DeepSeek / OpenAI / Moonshot / 智谱 GLM / 本地 Ollama），或选「自定义（OpenAI 兼容）」自己填
 3. 填 **Base URL**、**模型名**、**API Key**
 4. 点「测试连接」确认通路，保存
+
+设置窗口右上角可选 **跟随系统 / 浅色 / 深色**，点击「保存」后生效。
 
 **配置文件位置**：`%APPDATA%\PopDict\`
 

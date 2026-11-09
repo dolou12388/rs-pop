@@ -57,6 +57,10 @@ OK_COLOR = py_theme.OK_COLOR
 ERR_COLOR = py_theme.ERR_COLOR
 WARN_COLOR = py_theme.WARN_COLOR
 
+
+def _sync_theme_colors():
+    globals().update(py_theme.colors())
+
 FONT = None          # 延迟到窗口创建后再定（需要先挑字体族）
 FONT_B = None
 FONT_TITLE = None
@@ -81,13 +85,13 @@ ACTION_LABELS = {"search": "AI 搜索", "translate": "翻译", "explain": "解�
 
 
 def style_tk(root):
-    """统一的深色观感。
+    """给 ttk 控件应用当前主题。
 
     几处刻意的取舍：
       * 主题固定用 clam。Windows 原生 vista 主题会忽略大半配色项
         （按钮、下拉的底色改不动），clan 是唯一能完整着色的内置主题。
       * 圆角不靠 ttk 画（ttk 元素不支持），由 DWM 在窗口级处理，
-        见 py_theme.apply_dark_window。控件内部用留白和层级色区分，
+        见 py_theme.apply_window。控件内部用留白和层级色区分，
         不加边框 —— 深色界面上浅色边框会显得脏。
       * 按钮高度用 padding 撑，而不是 width/height 字符数：
         中文字符宽度与字符单位预期不一致，写死会大小不一。
@@ -223,7 +227,8 @@ def style_tk(root):
               relief=[("active", "flat")])
     style.map("Treeview",
               background=[("selected", ACCENT_DIM)],
-              foreground=[("selected", FG)])
+              foreground=[("selected", ON_ACCENT if
+                           py_theme.effective_mode() == "light" else FG)])
     # 去掉 Treeview 那圈突兀的 1px 边框
     style.layout("Treeview", [
         ("Treeview.treearea", {"sticky": "nswe"}),
@@ -252,6 +257,14 @@ def style_tk(root):
     style.map("TRadiobutton",
               background=[("active", BG2)],
               indicatorcolor=[("selected", ACCENT), ("active", BG4)])
+    style.configure("Theme.TRadiobutton", background=BG,
+                    foreground=FG_DIM, font=FONT, borderwidth=0,
+                    focuscolor=BG, indicatorcolor=BG3,
+                    padding=(py_dpi.px(5), py_dpi.px(4)))
+    style.map("Theme.TRadiobutton",
+              background=[("active", BG3)],
+              foreground=[("selected", ACCENT), ("active", FG)],
+              indicatorcolor=[("selected", ACCENT), ("active", BG4)])
     style.configure("TCheckbutton", background=BG2, foreground=FG, font=FONT,
                     borderwidth=0, focuscolor=BG2, indicatorcolor=BG3)
     style.map("TCheckbutton",
@@ -275,6 +288,7 @@ class SettingsWindow:
         self._prompt_drafts = {}
         self._loaded_prompt_action = None
         self._test_running = False
+        self._palette = py_theme.colors()
         # 跨线程关闭请求：只置位，由窗口自己的线程执行关闭
         self.close_request = threading.Event()
 
@@ -282,6 +296,8 @@ class SettingsWindow:
 
     def show(self):
         """在当前线程创建并运行窗口（阻塞直到关闭）。"""
+        _sync_theme_colors()
+        self._palette = py_theme.colors()
         self.root = tk.Tk()
         self.root.title("划词助手 · 设置")
         # 设置窗口跑在独立线程、独立的 Tk 实例里，不继承主窗口的
@@ -313,7 +329,7 @@ class SettingsWindow:
         # 放在 _center 之后（此时 geometry 已确定），再 update 一次让它落地。
         try:
             self.root.update_idletasks()
-            py_theme.apply_dark_window(self.root, small_corners=False)
+            py_theme.apply_window(self.root, small_corners=False)
         except Exception:
             pass
         # 外部请求关闭的通道。
@@ -322,6 +338,7 @@ class SettingsWindow:
         # "Tcl_AsyncDelete: async handler deleted by the wrong thread"。
         # 所以别的线程只能置标志，由本线程的定时器自己关。
         self._poll_close()
+        self._poll_theme()
         try:
             self.root.mainloop()
         finally:
@@ -354,6 +371,7 @@ class SettingsWindow:
                 except tk.TclError:
                     pass
                 self.prompt_action = None
+            self.theme_var = None
         except Exception:
             pass
 
@@ -370,6 +388,26 @@ class SettingsWindow:
             self.root.after(120, self._poll_close)
         except tk.TclError:
             pass
+
+    def _poll_theme(self):
+        if self.root is None:
+            return
+        self._apply_theme()
+        try:
+            self.root.after(1000, self._poll_theme)
+        except tk.TclError:
+            pass
+
+    def _apply_theme(self):
+        current = py_theme.colors()
+        if current == self._palette:
+            return
+        old = self._palette
+        _sync_theme_colors()
+        style_tk(self.root)
+        py_theme.recolor_tree(self.root, old, current)
+        py_theme.apply_window(self.root)
+        self._palette = current
 
     def request_close(self):
         """任意线程可调：只置标志，真正的关闭由窗口自己的线程完成。"""
@@ -395,6 +433,18 @@ class SettingsWindow:
                   style="Sub.TLabel").pack(side="left",
                                            padx=(py_dpi.px(10), 0),
                                            pady=(py_dpi.px(4), 0))
+        theme_controls = ttk.Frame(head)
+        theme_controls.pack(side="right")
+        ttk.Label(theme_controls, text="主题", style="Dim.TLabel").pack(
+            side="left", padx=(0, py_dpi.px(8)))
+        self.theme_var = tk.StringVar(
+            value=self.store.raw["ui"]["theme_mode"])
+        for label, value in (("跟随系统", "system"),
+                             ("浅色", "light"), ("深色", "dark")):
+            ttk.Radiobutton(
+                theme_controls, text=label, value=value,
+                variable=self.theme_var, style="Theme.TRadiobutton",
+                command=self._mark_dirty).pack(side="left", padx=py_dpi.px(3))
 
         # 一条极弱的分割线，把标题区和内容区分开（不加会显得空）
         ttk.Frame(self.root, style="Bar.TFrame",
@@ -679,8 +729,13 @@ class SettingsWindow:
             self._load_detail(target)
 
         self._load_prompt()
-        self._dirty = bool(self._prompt_drafts)
+        self._dirty = bool(self._prompt_drafts) or self._theme_dirty()
         self._update_save_state()
+
+    def _theme_dirty(self):
+        return (hasattr(self, "theme_var") and self.theme_var is not None
+                and self.theme_var.get() !=
+                self.store.raw["ui"]["theme_mode"])
 
     def _name_of(self, pid):
         for p in self.store.providers():
@@ -737,7 +792,7 @@ class SettingsWindow:
             self.key_hint.configure(text="尚未填写密钥", foreground=WARN_COLOR)
 
         self.test_label.configure(text="")
-        self._dirty = bool(self._prompt_drafts)
+        self._dirty = bool(self._prompt_drafts) or self._theme_dirty()
         self._update_save_state()
 
     def _collect(self):
@@ -908,6 +963,8 @@ class SettingsWindow:
         for act, prompt in self._prompt_drafts.items():
             self.store.set_binding(act, prompt=prompt)
 
+        self.store.set_ui("theme_mode", self.theme_var.get())
+
         if not self.store.save():
             messagebox.showerror("保存失败",
                                  "配置文件写入失败，请检查磁盘权限。",
@@ -920,6 +977,8 @@ class SettingsWindow:
         self._update_save_state()
         self._load_providers(select_id=self.current_id)
         self._set_status("已保存", OK_COLOR)
+        py_theme.set_mode(self.theme_var.get())
+        self._apply_theme()
         if self.on_saved:
             try:
                 self.on_saved()
