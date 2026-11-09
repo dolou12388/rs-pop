@@ -159,7 +159,15 @@ class ClipGuard:
         self._skipped = []         # [(format_id, name, reason)]
         self._seq_before = None
         self._restored = False
+        self._copy_attempted = False
         self.restore_result = None
+
+    def _release_snapshot(self):
+        """释放尚未移交给系统剪贴板的 HGLOBAL。"""
+        for _, handle, _ in self._snapshot:
+            if handle:
+                kernel32.GlobalFree(handle)
+        self._snapshot = []
 
     # -------- 快照 --------
 
@@ -217,6 +225,7 @@ class ClipGuard:
         #   b) 有格式但全部不可拷贝（如只有 CF_BITMAP）-> 无法还原，必须如实报告
         had_any = bool(self._snapshot) or bool(self._skipped)
         self._was_empty = not had_any
+        self._backup_ok = not self._skipped
         return self
 
     # -------- 取词 --------
@@ -226,6 +235,15 @@ class ClipGuard:
 
         meta: changed / waited_ms / seq_delta / attempts
         """
+        if not self._backup_ok:
+            return None, {
+                "backup_ok": False,
+                "backup_error": "、".join(f"{name}: {reason}"
+                                         for _, name, reason in self._skipped),
+                "changed": False, "waited_ms": 0, "seq_delta": 0,
+                "attempts": 0,
+            }
+
         seq0 = clipboard_seq()
         t0 = time.time()
 
@@ -233,6 +251,7 @@ class ClipGuard:
         attempts = 0
         for use_insert in (False, True):
             attempts += 1
+            self._copy_attempted = True
             send_copy_keys(use_insert=use_insert)
             deadline = time.time() + timeout_ms / 1000.0
             while time.time() < deadline:
@@ -264,51 +283,41 @@ class ClipGuard:
     def restore(self):
         if self._restored:
             return self.restore_result or (True, "已还原")
+        try:
+            if not self._copy_attempted:
+                self.restore_result = (True, "未触发复制，原剪贴板未改动")
+                return self.restore_result
 
-        seq_now = clipboard_seq()
-        if self._seq_before is not None and seq_now == self._seq_before:
-            self._restored = True
-            self.restore_result = (True, "剪贴板未变化，跳过还原")
-            return self.restore_result
+            seq_now = clipboard_seq()
+            if self._seq_before is not None and seq_now == self._seq_before:
+                self.restore_result = (True, "剪贴板未变化，跳过还原")
+                return self.restore_result
 
-        if self._was_empty:
-            # 原本就是空剪贴板：清空即可，不能把中间态留下来
             if not _open_clipboard():
-                self._restored = True
-                self.restore_result = (False, "还原时无法打开剪贴板（原为空）")
+                self.restore_result = (False, "还原时无法打开剪贴板")
                 return self.restore_result
             try:
-                user32.EmptyClipboard()
+                if not user32.EmptyClipboard():
+                    self.restore_result = (False, "还原时无法清空剪贴板")
+                    return self.restore_result
+                if self._was_empty:
+                    self.restore_result = (True, "原剪贴板为空，已清空中间态")
+                    return self.restore_result
+
+                written = 0
+                for i, (fid, hcopy, size) in enumerate(self._snapshot):
+                    if user32.SetClipboardData(fid, hcopy):
+                        self._snapshot[i] = (fid, 0, size)  # 所有权已移交系统
+                        written += 1
+                total = len(self._snapshot)
+                self.restore_result = (written == total,
+                                       f"写回 {written}/{total} 个格式")
+                return self.restore_result
             finally:
                 user32.CloseClipboard()
-            self._restored = True
-            self.restore_result = (True, "原剪贴板为空，已清空中间态")
-            return self.restore_result
-
-        if not _open_clipboard():
-            self._restored = True
-            self.restore_result = (False, "还原时无法打开剪贴板")
-            return self.restore_result
-
-        written = 0
-        try:
-            user32.EmptyClipboard()
-            for fid, hcopy, size in self._snapshot:
-                if user32.SetClipboardData(fid, hcopy):
-                    written += 1
-                else:
-                    kernel32.GlobalFree(hcopy)
         finally:
-            user32.CloseClipboard()
-
-        self._restored = True
-        total = len(self._snapshot)
-        ok = written == total
-        detail = f"写回 {written}/{total} 个格式"
-        if self._skipped:
-            detail += f"，跳过 {len(self._skipped)} 个（{', '.join(n for _, n, _ in self._skipped)}）"
-        self.restore_result = (ok, detail)
-        return self.restore_result
+            self._release_snapshot()
+            self._restored = True
 
     def __exit__(self, exc_type, exc, tb):
         self.restore()

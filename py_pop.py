@@ -268,7 +268,9 @@ def try_clipboard():
     try:
         text, meta = guard.read_text_via_copy(timeout_ms=CLIP_TIMEOUT_MS)
         detail.update(meta)
-        detail["reason"] = "ok" if text else "复制未产生文本"
+        detail["reason"] = ("剪贴板快照不完整：" + meta["backup_error"]
+                            if not meta.get("backup_ok", True)
+                            else "ok" if text else "复制未产生文本")
         return (text or None), detail
     finally:
         guard.__exit__(None, None, None)
