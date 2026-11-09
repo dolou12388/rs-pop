@@ -178,8 +178,12 @@ class ClipGuard:
         try:
             fid = 0
             while True:
+                ctypes.set_last_error(0)
                 fid = user32.EnumClipboardFormats(fid)
                 if fid == 0:
+                    err = ctypes.get_last_error()
+                    if err:
+                        skipped.append((0, "-", f"枚举剪贴板格式失败 ({err})"))
                     break
                 if fid in NON_HGLOBAL_FORMATS:
                     skipped.append((fid, format_name(fid), "非 HGLOBAL 格式"))

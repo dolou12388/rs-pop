@@ -36,6 +36,23 @@ class ClipGuardSafetyTests(unittest.TestCase):
             self.assertFalse(meta["backup_ok"])
             self.assertEqual(copied, [])
 
+    def test_format_enumeration_failure_never_sends_copy(self):
+        copied = []
+        fake_user32 = types.SimpleNamespace(
+            OpenClipboard=lambda hwnd: True,
+            EnumClipboardFormats=lambda fid: 0,
+            CloseClipboard=lambda: True,
+        )
+        with patch.object(cg, "user32", fake_user32), \
+                patch.object(cg, "clipboard_seq", return_value=7), \
+                patch.object(cg.ctypes, "get_last_error", return_value=5), \
+                patch.object(cg, "send_copy_keys", side_effect=lambda **kw: copied.append(kw)):
+            with cg.ClipGuard() as guard:
+                text, meta = guard.read_text_via_copy()
+            self.assertIsNone(text)
+            self.assertFalse(meta["backup_ok"])
+            self.assertEqual(copied, [])
+
     def test_unchanged_clipboard_releases_snapshot_handle(self):
         freed = []
         with patch.object(cg.ClipGuard, "_backup", return_value=(
