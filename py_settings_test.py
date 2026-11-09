@@ -143,6 +143,24 @@ def main():
         b = store.binding("search")
         ck("提示词已更新", b["prompt"] == "新的搜索提示词", b["prompt"])
 
+        # 编辑多个提示词后切换类别，草稿应保留并一起保存。
+        win.prompt_text.delete("1.0", "end")
+        win.prompt_text.insert("1.0", "搜索草稿")
+        win._mark_dirty()
+        win.prompt_action.set("translate")
+        win._load_prompt()
+        win.prompt_text.delete("1.0", "end")
+        win.prompt_text.insert("1.0", "翻译草稿")
+        win._mark_dirty()
+        win.prompt_action.set("search")
+        win._load_prompt()
+        ck("切换类别保留未保存提示词",
+           win.prompt_text.get("1.0", "end-1c") == "搜索草稿")
+        win._save()
+        ck("多个提示词草稿一起保存",
+           store.binding("search")["prompt"] == "搜索草稿"
+           and store.binding("translate")["prompt"] == "翻译草稿")
+
         # ---------- 6 新增供应商 ----------
         print("\n6 新增供应商")
         n_before = len(store.providers())

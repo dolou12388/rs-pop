@@ -272,6 +272,8 @@ class SettingsWindow:
         self.root = None
         self.current_id = None
         self._dirty = False
+        self._prompt_drafts = {}
+        self._loaded_prompt_action = None
         self._test_running = False
         # 跨线程关闭请求：只置位，由窗口自己的线程执行关闭
         self.close_request = threading.Event()
@@ -677,7 +679,7 @@ class SettingsWindow:
             self._load_detail(target)
 
         self._load_prompt()
-        self._dirty = False
+        self._dirty = bool(self._prompt_drafts)
         self._update_save_state()
 
     def _name_of(self, pid):
@@ -734,7 +736,7 @@ class SettingsWindow:
             self.key_hint.configure(text="尚未填写密钥", foreground=WARN_COLOR)
 
         self.test_label.configure(text="")
-        self._dirty = False
+        self._dirty = bool(self._prompt_drafts)
         self._update_save_state()
 
     def _collect(self):
@@ -781,12 +783,25 @@ class SettingsWindow:
         self._dirty = True
         self._update_save_state()
 
+    def _remember_prompt(self):
+        act = self._loaded_prompt_action
+        if not act:
+            return
+        text = self.prompt_text.get("1.0", "end-1c").rstrip()
+        if text == self.store.binding(act).get("prompt", ""):
+            self._prompt_drafts.pop(act, None)
+        else:
+            self._prompt_drafts[act] = text
+
     def _load_prompt(self):
+        self._remember_prompt()
         act = self.prompt_action.get()
         b = self.store.binding(act)
         self.prompt_text.delete("1.0", "end")
-        self.prompt_text.insert("1.0", b.get("prompt", ""))
+        self.prompt_text.insert("1.0", self._prompt_drafts.get(
+            act, b.get("prompt", "")))
         self.prompt_text.edit_modified(False)
+        self._loaded_prompt_action = act
 
     def _on_bind_change(self, act):
         var, cb = self.bind_vars[act]
@@ -888,9 +903,9 @@ class SettingsWindow:
             pid = getattr(cb, "_pid", None) or self._id_of_name(var.get())
             if pid:
                 self.store.set_binding(act, provider_id=pid)
-        act = self.prompt_action.get()
-        self.store.set_binding(act,
-                               prompt=self.prompt_text.get("1.0", "end").rstrip())
+        self._remember_prompt()
+        for act, prompt in self._prompt_drafts.items():
+            self.store.set_binding(act, prompt=prompt)
 
         if not self.store.save():
             messagebox.showerror("保存失败",
@@ -898,6 +913,8 @@ class SettingsWindow:
                                  parent=self.root)
             return
 
+        self._prompt_drafts.clear()
+        self._loaded_prompt_action = None
         self._dirty = False
         self._update_save_state()
         self._load_providers(select_id=self.current_id)
