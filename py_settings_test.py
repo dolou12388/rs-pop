@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+import unittest.mock
 
 import py_config
 import py_ai
@@ -160,6 +161,20 @@ def main():
         ck("多个提示词草稿一起保存",
            store.binding("search")["prompt"] == "搜索草稿"
            and store.binding("translate")["prompt"] == "翻译草稿")
+
+        win.prompt_text.delete("1.0", "end")
+        win.prompt_text.insert("1.0", "切换供应商时的草稿")
+        win._mark_dirty()
+        win.tree.selection_set("b")
+        with unittest.mock.patch.object(py_settings.messagebox, "askyesno",
+                                        return_value=True):
+            win._on_select()
+        ck("切换供应商后提示词仍可保存",
+           win.prompt_text.get("1.0", "end-1c") == "切换供应商时的草稿"
+           and str(win.btn_save["state"]) == "normal")
+        win._save()
+        ck("切换供应商后草稿已持久化",
+           store.binding("search")["prompt"] == "切换供应商时的草稿")
 
         # ---------- 6 新增供应商 ----------
         print("\n6 新增供应商")

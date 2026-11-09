@@ -711,6 +711,7 @@ class SettingsWindow:
         self._load_detail(sel[0])
 
     def _load_detail(self, pid):
+        self._remember_prompt()
         p = self.store.provider(pid)
         if not p:
             return
