@@ -96,6 +96,7 @@ def test_request_chain():
     class Window:
         source_text = "最初划选的原文"
         cancel_event = threading.Event()
+        _request_id = 1
 
         def set_status(self, *args):
             pass
@@ -125,6 +126,56 @@ def test_request_chain():
     check("追问放在历史末尾",
           [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
           and messages[-1]["content"] == "这是什么意思？", messages)
+
+
+def test_stop_retry_isolation():
+    """停止后立即重试，旧请求的排队内容和迟到回调都不得进入新轮次。"""
+    from unittest.mock import patch
+    import tkinter as tk
+    import py_pop
+
+    class Store:
+        def readiness(self, key):
+            return True, "就绪"
+
+        def binding(self, key):
+            return {"prompt": "", "provider": {"model": "test"}}
+
+    root = tk.Tk()
+    root.withdraw()
+    win = py_pop.ResultWindow(root, "测试", "原文")
+    requests = []
+    try:
+        with patch.object(py_pop.py_ai, "ask_async",
+                          side_effect=lambda *a, **kw: requests.append(kw)):
+            win.begin_request()
+            py_pop.request_ai(win, Store(), "search", "原文", [], True)
+            old = requests[-1]
+            old["on_delta"]("排队的旧内容")
+            win._stop()
+            win.begin_request()
+            py_pop.request_ai(win, Store(), "search", "新问题",
+                              [("assistant", "旧回答")], False)
+            new = requests[-1]
+            old["on_delta"]("迟到的旧内容")
+            old["on_done"]("旧请求完成")
+            new["on_delta"]("新回答")
+            new["on_done"]("新回答")
+
+        root.after(100, root.quit)
+        root.mainloop()
+        body = win.body.get("1.0", "end-1c")
+        check("停止后使用独立取消事件",
+              old["cancel_event"] is not new["cancel_event"]
+              and old["cancel_event"].is_set())
+        check("旧请求不能污染新轮次",
+              win._acc == "新回答" and "旧内容" not in body
+              and "旧请求完成" not in body
+              and win._turns == [("", "新回答")],
+              (win._acc, body, win._turns))
+    finally:
+        win.close()
+        root.destroy()
 
 
 # ---------- B. 历史累积与渲染 ----------
@@ -389,6 +440,7 @@ if __name__ == "__main__":
     print("=" * 62)
     test_messages()
     test_request_chain()
+    test_stop_retry_isolation()
     test_window()
     test_ui_contract()
     test_async_chain()

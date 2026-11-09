@@ -537,6 +537,8 @@ class ResultWindow:
         self.root = root
         self.closed = False
         self.cancel_event = threading.Event()
+        self._request_lock = threading.Lock()
+        self._request_id = 0
         self._acc = ""
         self._q = queue.Queue()
         self._pump_job = None
@@ -805,8 +807,6 @@ class ResultWindow:
         self._cur_q = q          # 记下本轮问题，收尾时写进 _turns
         self.btn_ask.config_state("disabled")
         self.btn_stop.config_state("normal")
-        self.cancel_event.clear()
-
         # 在正文里插入一条分隔 + 追问标题，让多轮脉络看得见
         self._begin_turn(q)
 
@@ -841,8 +841,10 @@ class ResultWindow:
 
     def _stop(self):
         """中断当前这一轮。"""
-        self.cancel_event.set()
-        self._busy = False
+        with self._request_lock:
+            self.cancel_event.set()
+            self._request_id += 1
+            self._busy = False
         self.btn_ask.config_state("normal")
         self.btn_stop.config_state("disabled")
         self._set_status_now("已停止", "#D9A441")
@@ -862,9 +864,11 @@ class ResultWindow:
         # 每次最多处理 200 条，避免一次涌入太多卡住界面
         for _ in range(200):
             try:
-                fn, args = self._q.get_nowait()
+                request_id, fn, args = self._q.get_nowait()
             except queue.Empty:
                 break
+            if request_id != self._request_id:
+                continue
             try:
                 fn(*args)
             except tk.TclError:
@@ -875,7 +879,7 @@ class ResultWindow:
         """任意线程都可调用：只入队，不碰控件。"""
         if self.closed:
             return
-        self._q.put((fn, args))
+        self._q.put((self._request_id, fn, args))
 
     # ---------- 状态 ----------
 
@@ -888,10 +892,14 @@ class ResultWindow:
         except tk.TclError:
             pass
 
-    def append(self, piece):
+    def append(self, piece, request_id=None):
         """流式追加一段文本（线程安全）。"""
-        self._acc += piece
-        self._post(self._append_now, piece)
+        with self._request_lock:
+            if (request_id is not None and
+                    (request_id != self._request_id or self.cancel_event.is_set())):
+                return
+            self._acc += piece
+            self._post(self._append_now, piece)
 
     def _append_now(self, piece):
         try:
@@ -907,30 +915,34 @@ class ResultWindow:
         on_ask，而 on_ask 里才调本方法；第一轮则由构造方在调用前
         _cur_q 保持默认空串。
         """
-        self._acc = ""
-        self._busy = True
-        self._answer_pushed = False
-        self._post(self._begin_now)
+        with self._request_lock:
+            self.cancel_event.set()
+            self.cancel_event = threading.Event()
+            self._request_id += 1
+            self._acc = ""
+            self._busy = True
+            self._answer_pushed = False
+            self._post(self._begin_now)
 
     def _begin_now(self):
         self.btn_ask.config_state("disabled")
         self.btn_stop.config_state("normal")
 
-    def finish(self, text=None, elapsed_ms=None):
-        if text is not None:
-            self._acc = text
-        # 收尾时把累积的 Markdown 一次性渲染成富文本。
-        # 为什么不在流式过程中边收边渲染：
-        #   1) 逐字插入会把 "**" "#" "```" 这些语法字符闪出来，观感更差；
-        #   2) 每来一片就全量重解析，长回答下会明显拖慢界面。
-        # 所以流式只追原文，完成时渲染一次。
-        self._post(self._render_now, self._acc, True)
-        msg = "完成"
-        if elapsed_ms is not None:
-            msg = f"完成 · {elapsed_ms / 1000:.1f}s · {len(self._acc)} 字"
-        self.set_status(msg, OK_COLOR)
-        self._busy = False
-        self._post(self._finish_ui_now)
+    def finish(self, text=None, elapsed_ms=None, request_id=None):
+        with self._request_lock:
+            if (request_id is not None and
+                    (request_id != self._request_id or self.cancel_event.is_set())):
+                return
+            if text is not None:
+                self._acc = text
+            # 流式先显示原文，完成后一次性渲染 Markdown。
+            self._post(self._render_now, self._acc, True)
+            msg = "完成"
+            if elapsed_ms is not None:
+                msg = f"完成 · {elapsed_ms / 1000:.1f}s · {len(self._acc)} 字"
+            self.set_status(msg, OK_COLOR)
+            self._busy = False
+            self._post(self._finish_ui_now)
 
     def _finish_ui_now(self):
         self.btn_ask.config_state("normal")
@@ -986,11 +998,15 @@ class ResultWindow:
         except tk.TclError:
             pass
 
-    def show_error(self, err):
+    def show_error(self, err, request_id=None):
         kind = getattr(err, "kind", "error")
         msg = getattr(err, "message", str(err))
         detail = getattr(err, "detail", "")
-        self._post(self._show_error_now, kind, msg, detail)
+        with self._request_lock:
+            if (request_id is not None and
+                    (request_id != self._request_id or self.cancel_event.is_set())):
+                return
+            self._post(self._show_error_now, kind, msg, detail)
 
     def _show_error_now(self, kind, msg, detail):
         self._busy = False
@@ -1142,16 +1158,17 @@ def request_ai(win, store, key, question, history, is_first):
     t0 = time.time()
     source_text = question if is_first else win.source_text
     turns = None if is_first else list(history) + [("user", question)]
+    request_id = win._request_id
 
     def on_done(full):
-        win.finish(full, (time.time() - t0) * 1000)
+        win.finish(full, (time.time() - t0) * 1000, request_id=request_id)
 
     try:
         py_ai.ask_async(
             key, source_text, binding,
-            on_delta=win.append,
+            on_delta=lambda piece: win.append(piece, request_id=request_id),
             on_done=on_done,
-            on_error=win.show_error,
+            on_error=lambda err: win.show_error(err, request_id=request_id),
             cancel_event=win.cancel_event,
             history=turns,
         )
