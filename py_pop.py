@@ -844,6 +844,9 @@ class ResultWindow:
         with self._request_lock:
             self.cancel_event.set()
             self._request_id += 1
+            if (self._busy and self._cur_q and self.history
+                    and self.history[-1] == ("user", self._cur_q)):
+                self.history.pop()
             self._busy = False
         self.btn_ask.config_state("normal")
         self.btn_stop.config_state("disabled")

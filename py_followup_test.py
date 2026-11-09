@@ -178,6 +178,25 @@ def test_stop_retry_isolation():
         root.destroy()
 
 
+def test_stop_drops_unanswered_question():
+    import tkinter as tk
+    import py_pop
+
+    root = tk.Tk()
+    root.withdraw()
+    win = py_pop.ResultWindow(root, "测试", "原文")
+    try:
+        win.begin_request()
+        win.history = [("assistant", "首轮回答"), ("user", "已中止的问题")]
+        win._cur_q = "已中止的问题"
+        win._stop()
+        check("停止后历史不含未回答问题",
+              win.history == [("assistant", "首轮回答")], win.history)
+    finally:
+        win.close()
+        root.destroy()
+
+
 # ---------- B. 历史累积与渲染 ----------
 
 def test_window():
@@ -441,6 +460,7 @@ if __name__ == "__main__":
     test_messages()
     test_request_chain()
     test_stop_retry_isolation()
+    test_stop_drops_unanswered_question()
     test_window()
     test_ui_contract()
     test_async_chain()
