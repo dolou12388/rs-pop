@@ -40,6 +40,7 @@ import py_config
 import py_dpi
 import py_log
 import py_markdown
+import py_pill_effect
 import py_res
 import py_theme
 
@@ -330,6 +331,8 @@ def place_near_cursor(x, y, w, h):
 
 
 class Pill:
+    TRANSPARENT_KEY = "#FF00FF"
+
     def __init__(self, root, on_action):
         self.root = root
         self.on_action = on_action
@@ -344,12 +347,7 @@ class Pill:
         self.win.attributes("-alpha", 0.97)
         self.win.configure(bg=py_theme.BG2)
 
-        self.hwnd = user32.GetAncestor(self.win.winfo_id(), 2)
-        style = user32.GetWindowLongW(self.hwnd, GWL_EXSTYLE)
-        user32.SetWindowLongW(
-            self.hwnd, GWL_EXSTYLE,
-            style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
-        )
+        self.hwnd = None
         self._build()
         # 尺寸按实际内容量出来，而不是写死 —— 不同 DPI / 字体回退下
         # 文字宽度差别很大，写死会导致按钮被裁掉或右侧留一大片空。
@@ -358,6 +356,33 @@ class Pill:
         self.win.withdraw()
         self._job = None
         self._rounded = False
+        self._backdrop = None
+        try:
+            self._backdrop = py_pill_effect.PillBackdrop()
+            ready = self._backdrop.prepare(
+                self.pill_w, self.pill_h, py_dpi.px(10), py_theme.BG2)
+        except Exception:
+            ready = False
+        if ready:
+            try:
+                self.win.attributes("-alpha", 1.0)
+                self.win.configure(bg=self.TRANSPARENT_KEY)
+                self.win.attributes("-transparentcolor", self.TRANSPARENT_KEY)
+            except tk.TclError:
+                self._disable_backdrop()
+        else:
+            self._disable_backdrop()
+
+    def _disable_backdrop(self):
+        if self._backdrop:
+            self._backdrop.close()
+            self._backdrop = None
+        try:
+            self.win.attributes("-transparentcolor", "")
+        except tk.TclError:
+            pass
+        self.win.configure(bg=py_theme.BG2)
+        self.win.attributes("-alpha", 0.97)
 
     def _build(self):
         """排布四个按钮，返回每个按钮的右边界与高度。"""
@@ -405,11 +430,23 @@ class Pill:
         self.win.geometry(f"{w}x{h}+{px}+{py}")
         self.win.deiconify()
         self.win.lift()
-        # 圆角必须在窗口已 map、拿到真实尺寸之后再切。用 SetWindowRgn
-        # 而不是 DWM —— overrideredirect 窗口没有非客户区，DWM 不管
-        # （实测窗口矩形与客户区差 0x0，见 py_popup_probe.py）。
-        # 失败只是变成直角，不影响功能，所以静默。
-        if not self._rounded:
+        self.win.update_idletasks()
+        hwnd = user32.GetAncestor(self.win.winfo_id(), 2)
+        if hwnd != self.hwnd:
+            self.hwnd = hwnd
+            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            user32.SetWindowLongW(
+                hwnd, GWL_EXSTYLE,
+                style | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST)
+            py_pill_effect.user32.SetWindowPos(
+                hwnd, py_pill_effect.HWND_TOPMOST, 0, 0, 0, 0,
+                py_pill_effect.SWP_NOSIZE | py_pill_effect.SWP_NOMOVE |
+                py_pill_effect.SWP_NOACTIVATE |
+                py_pill_effect.SWP_FRAMECHANGED)
+        if self._backdrop and not self._backdrop.show(px, py, self.hwnd):
+            self._disable_backdrop()
+        # 老系统或逐像素底板失败时保留二值圆角退路。
+        if not self._backdrop and not self._rounded:
             self.win.update_idletasks()
             self._rounded = py_theme.round_region(self.win,
                                                   py_dpi.px(10))
@@ -431,10 +468,30 @@ class Pill:
         if not self.visible:
             return
         self.win.withdraw()
+        if self._backdrop:
+            self._backdrop.hide()
         self.visible = False
 
     def apply_theme(self, old, new):
         py_theme.recolor_tree(self.win, old, new)
+        if self._backdrop:
+            ok = self._backdrop.prepare(
+                self.pill_w, self.pill_h, py_dpi.px(10), py_theme.BG2)
+            if ok and self.visible:
+                ok = self._backdrop.show(self.rect[0], self.rect[1],
+                                         self.hwnd)
+            if not ok:
+                self._disable_backdrop()
+                if self.visible:
+                    self._rounded = py_theme.round_region(
+                        self.win, py_dpi.px(10))
+
+    def close(self):
+        self.hide()
+        if self._backdrop:
+            self._backdrop.close()
+            self._backdrop = None
+        self.win.destroy()
 
 
 RESULT_BG = py_theme.BG
@@ -1667,6 +1724,10 @@ def main():
                 w.close()
             except Exception:
                 pass
+        try:
+            pill.close()
+        except tk.TclError:
+            pass
         if tray:
             tray.stop()
         print(f"\n统计: 拖选触发 {watcher.fire_count} 次 / 命中 {watcher.hit_count} 次")

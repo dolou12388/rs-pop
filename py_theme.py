@@ -15,7 +15,7 @@ Windows 11（build 22000+）的 DWM 提供 `DWMWA_WINDOW_CORNER_PREFERENCE`，
 
 注意两个限制（实测）：
   1. `overrideredirect(True)` 的无边框窗口不走 DWM 的窗口框架，
-     该属性对它无效。浮层因此改用 alpha 合成的圆角底图（见 pill_round_rect）。
+     该属性对它无效。浮层用逐像素透明的底板绘制圆角和阴影。
   2. 属性必须在窗口**已映射**（有 HWND 且可见）之后设置才稳定生效。
 
 ## 标题栏
