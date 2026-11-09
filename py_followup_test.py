@@ -197,6 +197,64 @@ def test_stop_drops_unanswered_question():
         root.destroy()
 
 
+def test_pending_finish_blocks_followup():
+    import tkinter as tk
+    import py_pop
+
+    asked = []
+    root = tk.Tk()
+    root.withdraw()
+    win = py_pop.ResultWindow(root, "测试", "原文",
+                              on_ask=lambda q, h: asked.append((q, h)))
+    try:
+        win.begin_request()
+        win.finish("首轮回答")
+        win._hint_shown = False
+        win.ask_entry.delete("1.0", "end")
+        win.ask_entry.insert("1.0", "追问")
+        win._do_ask()
+        check("回答入历史前拒绝追问", not asked and win._busy, asked)
+        root.after(100, root.quit)
+        root.mainloop()
+        check("回答收尾后历史顺序正确",
+              win.history == [("assistant", "首轮回答")], win.history)
+    finally:
+        win.close()
+        root.destroy()
+
+
+def test_failed_followup_does_not_enter_history():
+    import tkinter as tk
+    import py_pop
+
+    class NotReady:
+        def readiness(self, key):
+            return False, "未配置"
+
+    root = tk.Tk()
+    root.withdraw()
+    win = None
+    try:
+        def on_ask(q, history):
+            win.begin_request()
+            py_pop.request_ai(win, NotReady(), "search", q, history, False)
+
+        win = py_pop.ResultWindow(root, "测试", "原文", on_ask=on_ask)
+        win.history = [("assistant", "首轮回答")]
+        win._hint_shown = False
+        win.ask_entry.delete("1.0", "end")
+        win.ask_entry.insert("1.0", "失败的问题")
+        win._do_ask()
+        root.after(100, root.quit)
+        root.mainloop()
+        check("失败追问不进入下一轮历史",
+              win.history == [("assistant", "首轮回答")], win.history)
+    finally:
+        if win:
+            win.close()
+        root.destroy()
+
+
 # ---------- B. 历史累积与渲染 ----------
 
 def test_window():
@@ -461,6 +519,8 @@ if __name__ == "__main__":
     test_request_chain()
     test_stop_retry_isolation()
     test_stop_drops_unanswered_question()
+    test_pending_finish_blocks_followup()
+    test_failed_followup_does_not_enter_history()
     test_window()
     test_ui_contract()
     test_async_chain()

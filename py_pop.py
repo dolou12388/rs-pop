@@ -815,6 +815,7 @@ class ResultWindow:
         try:
             self.on_ask(q, hist)
         except Exception as e:
+            self._drop_unanswered_question()
             self._busy = False
             self.btn_ask.config_state("normal")
             self.btn_stop.config_state("disabled")
@@ -839,14 +840,18 @@ class ResultWindow:
         self._answer_start = tw.index("end-1c")
         tw.see("end")
 
+    def _drop_unanswered_question(self):
+        if (self._cur_q and self.history
+                and self.history[-1] == ("user", self._cur_q)):
+            self.history.pop()
+
     def _stop(self):
         """中断当前这一轮。"""
         with self._request_lock:
             self.cancel_event.set()
             self._request_id += 1
-            if (self._busy and self._cur_q and self.history
-                    and self.history[-1] == ("user", self._cur_q)):
-                self.history.pop()
+            if self._busy:
+                self._drop_unanswered_question()
             self._busy = False
         self.btn_ask.config_state("normal")
         self.btn_stop.config_state("disabled")
@@ -944,7 +949,6 @@ class ResultWindow:
             if elapsed_ms is not None:
                 msg = f"完成 · {elapsed_ms / 1000:.1f}s · {len(self._acc)} 字"
             self.set_status(msg, OK_COLOR)
-            self._busy = False
             self._post(self._finish_ui_now)
 
     def _finish_ui_now(self):
@@ -965,6 +969,7 @@ class ResultWindow:
         # 本轮问题用请求发起时记下的 _cur_q，不要用 history[-2] 反推 ——
         # 历史裁剪后索引会飘，而且第一轮那里存的是原文，会被误当成"追问"。
         self._turns.append((self._cur_q, self._acc))
+        self._busy = False
         try:
             self.ask_entry.focus_set()
         except tk.TclError:
@@ -1012,6 +1017,7 @@ class ResultWindow:
             self._post(self._show_error_now, kind, msg, detail)
 
     def _show_error_now(self, kind, msg, detail):
+        self._drop_unanswered_question()
         self._busy = False
         self.btn_ask.config_state("normal")
         self.btn_stop.config_state("disabled")
