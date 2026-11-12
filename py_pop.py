@@ -42,6 +42,7 @@ import py_log
 import py_markdown
 import py_pill_effect
 import py_pill_icon
+import py_pill_round
 import py_res
 import py_theme
 
@@ -385,50 +386,112 @@ class Pill:
         self.win.configure(bg=py_theme.BG2)
         self.win.attributes("-alpha", 0.97)
 
-    def _build(self):
-        """排布四个按钮，每个按钮 = 线框图标 + 文字。
+    # 悬停高亮的圆角半径（逻辑像素，会按 DPI 换算）
+    HOVER_RADIUS = 6
 
-        用 Frame 作容器而不是单个 Label：悬停时要让图标和文字
-        同时换底色，否则会出现图标底色与文字底色不一致的方块。
+    def _build(self):
+        """排布四个按钮，每个按钮 = 抗锯齿圆角底 + 线框图标 + 文字。
+
+        用 Canvas 而不是 Frame+Label：悬停底色要圆角，而 Tk 的
+        Frame/Label 只能填直角矩形。Canvas 能做两件 Frame 做不到的事 ——
+        贴带 alpha 的图（圆角边缘平滑），以及精确控制子元素位置。
+
+        图标与文字都用 create_text 画，因此整个按钮只有一个 widget，
+        不存在"图标底色与文字底色不一致"的方块问题。
         """
         self._buttons = []
-        # 图标字体不可用时自动退化为纯文字按钮
+        self._button_items = []       # [(canvas, bg_item, icon_item, text_item)]
+        self._bg_items = {}           # canvas -> bg_item，供 _hover 查
         icon_family = py_pill_icon.available_family(self.win)
-        self._icon_widgets = []
+        self._icon_widgets = []       # 兼容旧测试：记录图标是否存在
+        self._icon_family = icon_family
+
+        import tkinter.font as tkfont
+        self._icon_font = ((icon_family, 11) if icon_family else None)
+        self._text_font = (py_markdown.BASE_FAMILY, 9)
+        # 精确宽度必须靠 Font.measure —— Canvas 的 bbox 受字形留白影响，
+        # 同字号下不同字形量出来的宽度不一致，排布会忽宽忽窄。
+        self._f_icon = (tkfont.Font(root=self.win, font=self._icon_font)
+                        if icon_family else None)
+        self._f_text = tkfont.Font(root=self.win, font=self._text_font)
+
+        pad_x = py_dpi.px(7)
+        # Frame 的 padx 同样是「内容之外再加的内边距」，且原版 Label
+        # 还有 1px 默认 padx，两侧各多一点。Canvas 手工补齐这 3px，
+        # 让按钮宽度与原版一致（原版 79/63，改后也是 79/63）。
+        pad_x += 3
+        # Frame 的 pady 是「内容之外再加的内边距」，Canvas 没有这个属性，
+        # 必须自己算进高度。原版 Frame 按钮高 33px = 行高 17 + 内边距 16
+        # （pady=5 上下各 5，加上 Label 自身的 3px 默认 pady）。
+        # 这里用 px(8) 让 Canvas 高度也落在 33px，观感与原版一致。
+        pad_y = py_dpi.px(8)
+        gap_icon = py_dpi.px(4)
+        line = self._f_text.metrics("linespace")
+        icon_h = (self._f_icon.metrics("linespace")
+                  if self._f_icon else 0)
 
         for label, key in (("AI 搜索", "search"), ("翻译", "translate"),
                            ("解释", "explain"), ("复制", "copy")):
-            holder = tk.Frame(self.win, bg=py_theme.BG2,
-                              padx=py_dpi.px(7), pady=py_dpi.px(5))
-            glyph = None
-            if icon_family:
-                glyph = py_pill_icon.make_icon_label(
-                    holder, key, size_pt=11, color=py_theme.FG,
-                    bg=py_theme.BG2, root=self.win)
-                if glyph:
-                    glyph.pack(side="left", padx=(0, py_dpi.px(4)))
-            text = tk.Label(holder, text=label, fg=py_theme.FG,
-                            bg=py_theme.BG2,
-                            font=(py_markdown.BASE_FAMILY, 9))
-            text.pack(side="left")
+            glyph = py_pill_icon.GLYPHS.get(key)
+            icon_w = self._f_icon.measure(glyph) if self._f_icon else 0
+            text_w = self._f_text.measure(label)
 
-            # 整个容器 + 两个子件都要响应点击与悬停，否则鼠标落在
-            # 图标上时按钮不亮、点了也没反应。
-            for w in (holder, text) + ((glyph,) if glyph else ()):
-                w.bind("<Button-1>", lambda e, k=key: self.on_action(k))
-                w.bind("<Enter>", lambda e, h=holder: self._hover(h, True))
-                w.bind("<Leave>", lambda e, h=holder: self._hover(h, False))
+            inner_w = text_w + (icon_w + gap_icon if icon_w else 0)
+            w = inner_w + pad_x * 2
+            h = max(line, icon_h) + pad_y * 2
+            # 底色块与整个 Canvas 同尺寸，悬停时整块换成圆角高亮
+            canvas = tk.Canvas(self.win, width=w, height=h,
+                               bg=py_theme.BG2, highlightthickness=0,
+                               bd=0, takefocus=0, cursor="hand2")
+            bg_item = canvas.create_image(0, 0, anchor="nw")
+            canvas.itemconfigure(bg_item, state="hidden")
 
-            self._buttons.append(holder)
-            self._icon_widgets.append(glyph)
+            cy = h // 2
+            x = pad_x
+            icon_item = None
+            if icon_w:
+                icon_item = canvas.create_text(
+                    x, cy, text=glyph, anchor="w",
+                    font=self._icon_font, fill=py_theme.FG)
+                x += icon_w + gap_icon
 
-    def _hover(self, holder, on):
-        """悬停：容器与所有子件一起换底色。"""
-        bg = py_theme.BG4 if on else py_theme.BG2
+            text_item = canvas.create_text(
+                x, cy, text=label, anchor="w",
+                font=self._text_font, fill=py_theme.FG)
+
+            # 点击与悬停都绑在 Canvas 上（只有一个 widget，不会漏）
+            canvas.bind("<Button-1>",
+                        lambda e, k=key: self.on_action(k))
+            canvas.bind("<Enter>", lambda e, c=canvas: self._hover(c, True))
+            canvas.bind("<Leave>", lambda e, c=canvas: self._hover(c, False))
+
+            self._buttons.append(canvas)
+            self._button_items.append(
+                (canvas, bg_item, icon_item, text_item))
+            self._bg_items[canvas] = bg_item
+            self._icon_widgets.append(icon_item)
+
+    def _hover(self, canvas, on):
+        """悬停：贴一张抗锯齿圆角高亮图，离开时隐藏。
+
+        不用改 bg 的原因：Canvas 的 bg 只能整块直角填充，圆角必须靠
+        贴图。图由 py_pill_round 按 (尺寸, 半径, 颜色) 缓存，切换主题
+        时颜色变了但 key 不同，会各自生成，不会读到旧色。
+        """
+        item = self._bg_items.get(canvas)
+        if item is None:
+            return
         try:
-            holder.configure(bg=bg)
-            for child in holder.winfo_children():
-                child.configure(bg=bg)
+            if on:
+                w = canvas.winfo_reqwidth()
+                h = canvas.winfo_reqheight()
+                img = py_pill_round.rounded_image(
+                    w, h, py_dpi.px(self.HOVER_RADIUS), py_theme.BG4)
+                canvas.itemconfigure(item, image=img, state="normal")
+                # PhotoImage 必须留引用，否则被 GC 掉 Canvas 上的图变空白
+                canvas._popdict_hover_img = img
+            else:
+                canvas.itemconfigure(item, state="hidden")
         except tk.TclError:
             pass
 
@@ -509,6 +572,10 @@ class Pill:
 
     def apply_theme(self, old, new):
         py_theme.recolor_tree(self.win, old, new)
+        # recolor_tree 只处理 widget 自身的 -background/-foreground，
+        # 碰不到 Canvas 里的 item。按钮的文字与图标是 create_text 画的，
+        # 必须显式改 fill，否则切主题后仍是旧色。
+        self._restyle_buttons()
         if self._backdrop:
             ok = self._backdrop.prepare(
                 self.pill_w, self.pill_h, py_dpi.px(10), py_theme.BG2)
@@ -520,6 +587,23 @@ class Pill:
                 if self.visible:
                     self._rounded = py_theme.round_region(
                         self.win, py_dpi.px(10))
+
+    def _restyle_buttons(self):
+        """主题切换后刷新按钮：Canvas 底色、图标与文字的 fill。
+
+        Canvas 的 item 不在 recolor_tree 的遍历范围内（它只看 widget），
+        所以这里逐个改。悬停高亮图也丢掉缓存重生成 —— 尺寸不变但
+        颜色变了，旧图是上一个主题的 BG4。
+        """
+        py_pill_round.clear_cache()
+        for canvas, _bg, icon_item, text_item in self._button_items:
+            try:
+                canvas.configure(bg=py_theme.BG2)
+                if icon_item is not None:
+                    canvas.itemconfigure(icon_item, fill=py_theme.FG)
+                canvas.itemconfigure(text_item, fill=py_theme.FG)
+            except tk.TclError:
+                pass
 
     def close(self):
         self.hide()

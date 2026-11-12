@@ -18,6 +18,7 @@ Windows 全局划词弹窗：鼠标拖选任意文字，浮层即出现在选区
 - **保护剪贴板**：可完整备份时逐格式按字节还原；截图留下的图片格式也照常取词，不会被它挡住
 - **取消选中自动关闭**：浮层跟随选区生命周期，不会飘在屏幕上挡内容
 - **图标按钮**：浮层四个按钮都带线框图标，用系统图标字体绘制（`Segoe Fluent Icons` / `Segoe MDL2 Assets`），不打包任何图片资源；字体不可用时自动退化为纯文字，图标颜色随主题翻转
+- **圆角悬停高亮**：鼠标移上去的高亮块是抗锯齿圆角，不是直角。Tk 的 Canvas 不做抗锯齿，所以圆角块由程序自己生成带 alpha 的 PNG 后贴图，边缘平滑不留台阶
 - **AI 搜索 / 翻译 / 解释**：任何 OpenAI 兼容接口都能接（DeepSeek、OpenAI、Moonshot、智谱、本地 Ollama…）
 - **Markdown 渲染**：标题、列表、表格（按显示宽度对齐）、代码块、引用、链接全部原生渲染
 - **多轮追问**：历史按正确顺序注入，首轮回答也进上下文
@@ -145,6 +146,7 @@ py_tray.py            托盘图标（纯 ctypes，不用 pystray）
 py_theme.py           配色单一真源
 py_pill_effect.py     浮层的抗锯齿圆角与阴影（逐像素分层窗口）
 py_pill_icon.py       按钮图标（系统图标字体，无图片资源）
+py_pill_round.py      按钮悬停高亮的抗锯齿圆角块（生成 alpha PNG 贴图）
 py_dpi.py             DPI 感知与换算
 py_res.py             读自身进程内存/句柄占用（7 项指标）
 py_log.py             日志
@@ -181,8 +183,9 @@ py -3 py_clipguard.py --test    :: 剪贴板事务（含「有图片时仍可取
 py -3 py_single_test.py         :: 单实例（必须在子进程里测）
 py -3 py_icon_wire_test.py      :: 图标接线
 py -3 py_ctrlc_test.py          :: 结果窗 Ctrl+C 只复制、不退出（含对照实验）
-py -3 py_pill_icon_test.py      :: 浮层图标字体 / 布局不重叠 / 悬停 / 点击
+py -3 py_pill_icon_test.py      :: 浮层图标字体 / 布局不重叠 / 点击 / 主题刷新
 py -3 py_pill_visual_test.py    :: 浮层真实绘制色（区分截图产物与界面缺陷）
+py -3 py_pill_hover_test.py     :: 悬停高亮是圆角且抗锯齿（角落背景色 + 过渡带中间色）
 py -3 _live_drag.py             :: 实机拖选端到端：真鼠标事件 + 浮层是否弹出
 ```
 

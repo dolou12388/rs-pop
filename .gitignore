@@ -26,12 +26,13 @@ bt.txt
 icon_preview.bmp
 _note_*.md
 
-# _live_drag.py 跑完会留下实机浮层截图，属于本地验证产物。
-# 保留 *_x4.png 也一并排除（放大查看用的中间图）。
+# _live_drag.py 跑完会留下实机浮层截图，py_pill_shot.py 会留下悬停态截图，
+# 都属本地验证产物。
 live_drag*.png
 *_x4.png
 screen_*.png
 pill_shot_*.png
+hover_*.png
 
 # 图标设计候选稿（一轮轮生成的备选方案，3.4MB）。
 # 真正的源图是 assets/icon_source.png，成品是根目录的 popdict.ico，
