@@ -15,8 +15,9 @@ Windows 全局划词弹窗：鼠标拖选任意文字，浮层即出现在选区
 ## 特性
 
 - **拖选即弹**：左键按下到松开位移 ≥ 4px 才触发，单击不会误触
-- **保护剪贴板**：可完整备份时逐格式按字节还原；遇到无法备份的格式时跳过取词
+- **保护剪贴板**：可完整备份时逐格式按字节还原；截图留下的图片格式也照常取词，不会被它挡住
 - **取消选中自动关闭**：浮层跟随选区生命周期，不会飘在屏幕上挡内容
+- **图标按钮**：浮层四个按钮都带线框图标，用系统图标字体绘制（`Segoe Fluent Icons` / `Segoe MDL2 Assets`），不打包任何图片资源；字体不可用时自动退化为纯文字，图标颜色随主题翻转
 - **AI 搜索 / 翻译 / 解释**：任何 OpenAI 兼容接口都能接（DeepSeek、OpenAI、Moonshot、智谱、本地 Ollama…）
 - **Markdown 渲染**：标题、列表、表格（按显示宽度对齐）、代码块、引用、链接全部原生渲染
 - **多轮追问**：历史按正确顺序注入，首轮回答也进上下文
@@ -142,6 +143,8 @@ py_config.py          配置与密钥持久化
 py_settings.py        设置界面
 py_tray.py            托盘图标（纯 ctypes，不用 pystray）
 py_theme.py           配色单一真源
+py_pill_effect.py     浮层的抗锯齿圆角与阴影（逐像素分层窗口）
+py_pill_icon.py       按钮图标（系统图标字体，无图片资源）
 py_dpi.py             DPI 感知与换算
 py_res.py             读自身进程内存/句柄占用（7 项指标）
 py_log.py             日志
@@ -174,13 +177,20 @@ py -3 _mkvbs2.py       :: 重新生成 启动划词.vbs
 ```bat
 py -3 py_dpi_test.py            :: DPI 声明顺序与换算
 py -3 py_markdown_test.py       :: Markdown 解析
-py -3 py_clipguard.py --test    :: 剪贴板事务
+py -3 py_clipguard.py --test    :: 剪贴板事务（含「有图片时仍可取词」回归）
 py -3 py_single_test.py         :: 单实例（必须在子进程里测）
 py -3 py_icon_wire_test.py      :: 图标接线
 py -3 py_ctrlc_test.py          :: 结果窗 Ctrl+C 只复制、不退出（含对照实验）
+py -3 py_pill_icon_test.py      :: 浮层图标字体 / 布局不重叠 / 悬停 / 点击
+py -3 py_pill_visual_test.py    :: 浮层真实绘制色（区分截图产物与界面缺陷）
+py -3 _live_drag.py             :: 实机拖选端到端：真鼠标事件 + 浮层是否弹出
 ```
 
 全部是自包含脚本，打印 `PASS` / `FAIL` 并返回退出码，不需要 pytest。
+
+关于 `py_pill_visual_test.py`：浮层用 `-transparentcolor "#FF00FF"` 做透明键，
+用 `PrintWindow` 抓图时透明区会被渲染成纯黑，看上去像有黑边和黑缝。
+那个测试改用窗口自身 DC 取色，只看「真正画了什么」，避免被截图的假象误导。
 
 ---
 
@@ -188,7 +198,7 @@ py -3 py_ctrlc_test.py          :: 结果窗 Ctrl+C 只复制、不退出（含�
 
 - **UIA TextPattern 在 Chromium 系上无效**：飞书、ChatGPT、Edge、豆包、微信等全部是 `Chrome_WidgetWin_1`，`GetSelection()` 恒返回 0，只能走剪贴板路径
 - **剪贴板中间态**：如上所述，无法对第三方剪贴板管理器完全隐藏
-- **部分剪贴板格式**：含无法备份的格式时会跳过该次取词，避免覆盖原内容
+- **部分剪贴板格式**：含无法备份的格式时会跳过该次取词，避免覆盖原内容。其中 `CF_BITMAP`（截图后必有）属于派生格式 —— 它由 `CF_DIB` / `CF_DIBV5` 自动合成，写回 DIB 后系统会重建，因此跳过它不影响还原，也不会阻止取词
 - **多显示器混合缩放未实测**：只在单屏 150% 下验证过浮层定位与字号
 - **Win10 外观退化**：`DWMWA_WINDOW_CORNER_PREFERENCE` 是 Win11 才有的属性，Win10 上读回失败并自动跳过，显示为直角
 - **仅 Windows**：大量使用 `user32` / `kernel32` / `dwmapi`，没有跨平台打算

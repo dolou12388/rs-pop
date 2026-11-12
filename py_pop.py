@@ -41,6 +41,7 @@ import py_dpi
 import py_log
 import py_markdown
 import py_pill_effect
+import py_pill_icon
 import py_res
 import py_theme
 
@@ -385,37 +386,71 @@ class Pill:
         self.win.attributes("-alpha", 0.97)
 
     def _build(self):
-        """排布四个按钮，返回每个按钮的右边界与高度。"""
-        step = py_dpi.px(64)          # 96 DPI 下每格 64px
-        top = py_dpi.px(8)
-        x = py_dpi.px(6)
+        """排布四个按钮，每个按钮 = 线框图标 + 文字。
+
+        用 Frame 作容器而不是单个 Label：悬停时要让图标和文字
+        同时换底色，否则会出现图标底色与文字底色不一致的方块。
+        """
         self._buttons = []
-        self._slots = []
+        # 图标字体不可用时自动退化为纯文字按钮
+        icon_family = py_pill_icon.available_family(self.win)
+        self._icon_widgets = []
+
         for label, key in (("AI 搜索", "search"), ("翻译", "translate"),
                            ("解释", "explain"), ("复制", "copy")):
-            b = tk.Label(self.win, text=label, fg=py_theme.FG,
-                         bg=py_theme.BG2,
-                         font=(py_markdown.BASE_FAMILY, 9),
-                         padx=py_dpi.px(9), pady=py_dpi.px(6))
-            b.bind("<Button-1>", lambda e, k=key: self.on_action(k))
-            b.bind("<Enter>",
-                   lambda e, w=b: w.configure(bg=py_theme.BG4))
-            b.bind("<Leave>",
-                   lambda e, w=b: w.configure(bg=py_theme.BG2))
-            self._buttons.append(b)
-            self._slots.append((x, step, top))
-            x += step
+            holder = tk.Frame(self.win, bg=py_theme.BG2,
+                              padx=py_dpi.px(7), pady=py_dpi.px(5))
+            glyph = None
+            if icon_family:
+                glyph = py_pill_icon.make_icon_label(
+                    holder, key, size_pt=11, color=py_theme.FG,
+                    bg=py_theme.BG2, root=self.win)
+                if glyph:
+                    glyph.pack(side="left", padx=(0, py_dpi.px(4)))
+            text = tk.Label(holder, text=label, fg=py_theme.FG,
+                            bg=py_theme.BG2,
+                            font=(py_markdown.BASE_FAMILY, 9))
+            text.pack(side="left")
+
+            # 整个容器 + 两个子件都要响应点击与悬停，否则鼠标落在
+            # 图标上时按钮不亮、点了也没反应。
+            for w in (holder, text) + ((glyph,) if glyph else ()):
+                w.bind("<Button-1>", lambda e, k=key: self.on_action(k))
+                w.bind("<Enter>", lambda e, h=holder: self._hover(h, True))
+                w.bind("<Leave>", lambda e, h=holder: self._hover(h, False))
+
+            self._buttons.append(holder)
+            self._icon_widgets.append(glyph)
+
+    def _hover(self, holder, on):
+        """悬停：容器与所有子件一起换底色。"""
+        bg = py_theme.BG4 if on else py_theme.BG2
+        try:
+            holder.configure(bg=bg)
+            for child in holder.winfo_children():
+                child.configure(bg=bg)
+        except tk.TclError:
+            pass
 
     def _measure(self):
-        """按 4 个等宽槽位算出浮层实际需要的宽高。"""
+        """按内容实测宽度流式排布。
+
+        原实现是 4 个等宽 64px 槽位。加了图标后每个按钮变宽，固定槽位
+        会把「AI 搜索」裁掉并与右侧按钮的图标重叠。这里改为：
+        逐个按钮取自身请求宽度，依次右移，只补最小间距。
+        """
         self.win.update_idletasks()
-        w = self._slots[-1][0] + self._slots[-1][1] + py_dpi.px(2)
+        gap = py_dpi.px(2)
+        top = py_dpi.px(8)
+        left = py_dpi.px(6)
+        x = left
         h = 0
-        for (sx, sw, sy), b in zip(self._slots, self._buttons):
-            bw = max(sw - py_dpi.px(2), b.winfo_reqwidth())
-            b.place(x=sx, y=sy, width=bw)
-            h = max(h, sy + b.winfo_reqheight() + py_dpi.px(6))
-            w = max(w, sx + bw + py_dpi.px(2))
+        for b in self._buttons:
+            bw = b.winfo_reqwidth()
+            b.place(x=x, y=top, width=bw)
+            h = max(h, top + b.winfo_reqheight() + py_dpi.px(6))
+            x += bw + gap
+        w = x - gap + left        # 末尾不留多余间距
         return w, h
 
     def contains(self, x, y):
