@@ -129,6 +129,86 @@ EXCLUDED_CLASSES = {
     "PuTTY",
 }
 
+# 这些程序里拖框/拖拽的动作和"划词"长得一模一样，但语义完全不同，
+# 一旦被当成划词就会出事。降到进程级屏蔽，比 UI 级判据可靠。
+#
+# 关键在于截图工具：Win+Shift+S 的拖框位移轻松超过 MIN_DRAG_PX，
+# 会被判定为一次有效拖选，于是我们（1）合成 Ctrl+C 打断截图工具，
+# （2）在 1.3 秒的事务窗口内和截图工具抢剪贴板。用户看到的就是
+# "截图没了、截不出来"。这类程序必须整体排除。
+#
+# 进程名一律小写比较，见 _proc_name_of_hwnd()。
+EXCLUDED_PROCESSES = {
+    "snippingtool.exe",         # Win11 截图工具（Win+Shift+S）
+    "screenclippinghost.exe",   # Win11 截图遮罩宿主
+    "screensketch.exe",         # Win10/11 截图与草图
+    "snipaste.exe",             # Snipaste
+    "pixpin.exe",               # PixPin
+    "screenshot.exe",           # 通用截图工具
+    "sharex.exe",               # ShareX
+    "greenshot.exe",            # Greenshot
+    "faststone capture.exe",    # FastStone
+    "winsnap.exe",              # WinSnap
+    "lightshot.exe",            # Lightshot
+    "pickpick.exe",             # PicPick
+    "snipaste64.exe",
+    "qqpxy.exe",                # 部分 QQ 截图组件
+    "wemeetscreen.exe",         # 微信截图组件
+    "taskmgr.exe",              # 任务管理器进程列表拖拽
+    "explorer.exe",             # 桌面/资源管理器：拖选是拖文件
+}
+
+# 取进程名用的 API。QueryFullProcessImageNameW 需要 PROCESS_QUERY_LIMITED_INFORMATION，
+# 对绝大多数进程（含高权限进程的受限查询）可用；失败时退回 GetModuleBaseNameW。
+kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+kernel32.OpenProcess.restype = wt.HANDLE
+kernel32.CloseHandle.argtypes = [wt.HANDLE]
+kernel32.CloseHandle.restype = wt.BOOL
+kernel32.QueryFullProcessImageNameW.argtypes = [
+    wt.HANDLE, wt.DWORD, wt.LPWSTR, ctypes.POINTER(wt.DWORD)]
+kernel32.QueryFullProcessImageNameW.restype = wt.BOOL
+
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+# 缓存 pid -> 进程名。每 60ms 轮询都要判一次，不缓存会反复 OpenProcess。
+# 进程可能退出后 pid 被复用，所以值里带一份"是否已确认"的语义：
+# 这里只缓存成功的映射，失败不缓存（下次重试）。
+_proc_name_cache = {}
+
+
+def process_name_of_pid(pid):
+    """取 pid 对应的小写 exe 文件名；取不到返回空串。"""
+    if not pid:
+        return ""
+    hit = _proc_name_cache.get(pid)
+    if hit is not None:
+        return hit
+    name = ""
+    h = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if h:
+        try:
+            cap = wt.DWORD(1024)
+            buf = ctypes.create_unicode_buffer(cap.value)
+            if kernel32.QueryFullProcessImageNameW(h, 0, buf,
+                                                  ctypes.byref(cap)):
+                name = os.path.basename(buf.value).lower()
+        finally:
+            kernel32.CloseHandle(h)
+    if name:
+        # 缓存上限防止长久运行后无限增长（日常也就几十个进程）
+        if len(_proc_name_cache) > 256:
+            _proc_name_cache.clear()
+        _proc_name_cache[pid] = name
+    return name
+
+
+def process_name_of_hwnd(hwnd):
+    if not hwnd:
+        return ""
+    pid = wt.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return process_name_of_pid(pid.value)
+
 
 class GUITHREADINFO(ctypes.Structure):
     _fields_ = [
@@ -1575,9 +1655,11 @@ class Watcher:
         # 拖选轨迹
         self.down_pos = None        # 按下时的坐标
         self.moved = 0.0            # 按下期间的最大位移
+        self.press_proc = ""        # 按下瞬间的前台进程名（小写 exe）
         self.cursor_hist = []       # 按下期间采样到的坐标序列
         self.skip_single = 0        # 因位移不足被跳过的次数
         self.skip_too_far = 0       # 因位移过大被跳过的次数
+        self.skip_excluded = 0      # 因前台是截图/资源管理器等被跳过的次数
         self.auto_hide_count = 0    # 因取消选中自动关闭的次数
         self._esc_was_down = False
         # 事件合成的 Ctrl+C 会短暂改变键盘状态，用它避免我们自己触发自动关闭
@@ -1634,6 +1716,12 @@ class Watcher:
                 self.down_pos = (pt.x, pt.y)
                 self.moved = 0.0
                 self.cursor_hist = [(pt.x, pt.y)]
+                # 在**按下这一刻**判定前台进程，不能在松开时判 ——
+                # 截图工具的遮罩会在拖框过程中抢走前台，等到松开时
+                # 前台窗口可能已经换成遮罩宿主或别的程序，判定就会失效。
+                # 用户想划的那个窗口，就是按下的瞬间在最前面的那个。
+                self.press_proc = process_name_of_hwnd(
+                    user32.GetForegroundWindow())
 
                 # 在浮层外按下 —— 这是"取消选中"最直接的信号，立即关闭。
                 # 不要求位移，因为点一下别处就会让原选区变成 caret。
@@ -1673,6 +1761,12 @@ class Watcher:
                                 and self.pill.visible):
                             self.auto_hide_count += 1
                             self.pill.hide()
+                    elif self.press_proc in EXCLUDED_PROCESSES:
+                        # 截图工具 / 资源管理器等：拖框语义不是"选文字"。
+                        # 必须在这里就拦住 —— 一旦放行，我们会合成 Ctrl+C
+                        # 打断截图工具，并在事务窗口内和它抢剪贴板，
+                        # 用户看到的是"截图截不出来 / 截图丢了"。
+                        self.skip_excluded += 1
                     else:
                         # 有效拖选：旧浮层先收掉，再由 handle 展示新内容
                         if self.pill and self.pill.visible:
@@ -2021,6 +2115,9 @@ def main():
         print(f"      取消选中自动关闭 {watcher.auto_hide_count} 次")
         if watcher.skip_too_far:
             print(f"      跳过超远拖动 {watcher.skip_too_far} 次（位移>{MAX_DRAG_PX}px）")
+        if watcher.skip_excluded:
+            print(f"      跳过截图/资源管理器等 {watcher.skip_excluded} 次"
+                  f"（拖框语义不是划词，未碰剪贴板）")
         if watcher.hit_by_level:
             print(f"      命中分布: {watcher.hit_by_level}")
         # 退出前再看一眼内存，用于判断长时间运行后是否明显上涨

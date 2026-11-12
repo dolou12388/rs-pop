@@ -64,7 +64,19 @@ kernel32.GlobalSize.restype = ctypes.c_size_t
 
 CF_UNICODETEXT = 13
 CF_BITMAP = 2
+CF_DIB = 8
+CF_DIBV5 = 17
+CF_HDROP = 15
 GMEM_MOVEABLE = 0x0002
+
+# 我们合成的是 Ctrl+C（取文本），目标程序不可能因此写出位图或文件列表。
+# 所以剪贴板里一旦出现这些格式，就说明是截图工具 / 资源管理器写的，
+# 与本次取词无关 —— 此时还原会直接把用户的截图抹掉。
+#
+# 这就是「启用后截图在剪贴板里找不到」的直接原因：Win+Shift+S 的拖框
+# 本身就是一次位移远超阈值的拖选，会触发一次剪贴板事务，而截图工具
+# 恰好在事务窗口内把图写进剪贴板，随后的还原又把它 EmptyClipboard 掉。
+_FOREIGN_IMAGE_FORMATS = {CF_DIB, CF_DIBV5, CF_HDROP}
 
 VK_CONTROL = 0x11
 VK_C = 0x43
@@ -113,6 +125,48 @@ def _open_clipboard(retries=15, delay=0.02):
 
 def clipboard_seq():
     return user32.GetClipboardSequenceNumber()
+
+
+def _clipboard_state():
+    """一次性读出 (格式集合, 文本, 图片字节数)。
+
+    用来判断"剪贴板现在装的是不是我们写进去的东西"。
+    打不开剪贴板时返回 None —— 调用方据此放弃判断，走原有路径，
+    不能因为读不到状态就误认为有第三方写入。
+    """
+    if not _open_clipboard():
+        return None
+    try:
+        formats = set()
+        fid = 0
+        while True:
+            fid = user32.EnumClipboardFormats(fid)
+            if fid == 0:
+                break
+            formats.add(fid)
+
+        text = None
+        h = user32.GetClipboardData(CF_UNICODETEXT)
+        if h:
+            p = kernel32.GlobalLock(h)
+            if p:
+                try:
+                    text = ctypes.c_wchar_p(p).value
+                finally:
+                    kernel32.GlobalUnlock(h)
+
+        dib_size = None
+        for fid_img in (CF_DIBV5, CF_DIB):
+            if fid_img in formats:
+                hi = user32.GetClipboardData(fid_img)
+                if hi:
+                    size = kernel32.GlobalSize(hi)
+                    if size:
+                        dib_size = size
+                        break
+        return formats, text, dib_size
+    finally:
+        user32.CloseClipboard()
 
 
 def _is_safe_skip_reason(reason):
@@ -186,6 +240,12 @@ class ClipGuard:
         self._snapshot = []        # [(format_id, hglobal, size)]
         self._skipped = []         # [(format_id, name, reason)]
         self._seq_before = None
+        # 我们合成的 Ctrl+C 造成的「中间态」指纹：剪贴板稳定后的序列号，
+        # 以及我们实际写进去的文本。还原只以它为准 —— 只要现状与它不符，
+        # 就说明中间插进了别人的写入，此时一律不还原。见 _foreign_write_detected()。
+        self._intermediate_seq = None
+        self._intermediate_text = None
+        self._snapshot_formats = set()
         self._restored = False
         self._copy_attempted = False
         self.restore_result = None
@@ -259,6 +319,7 @@ class ClipGuard:
     def __enter__(self):
         self._seq_before = clipboard_seq()
         self._snapshot, self._skipped = self._backup()
+        self._snapshot_formats = {fid for fid, _, _ in self._snapshot}
         # 区分两种"快照为空"：
         #   a) 剪贴板本来就没有任何格式 -> 还原含义是清空
         #   b) 有格式但全部不可拷贝（如只有 CF_BITMAP）-> 无法还原，必须如实报告
@@ -315,6 +376,9 @@ class ClipGuard:
                     time.sleep(0.025)
                     text = read_text()
                     if text:
+                        # 记下"我们这次复制造成的结果"。还原只认这个指纹 ——
+                        # 之后再变，就说明中间插进了别人的写入，绝不覆盖。
+                        self.note_self_write(text)
                         return text, {
                             "changed": True,
                             "waited_ms": int((time.time() - t0) * 1000),
@@ -325,6 +389,9 @@ class ClipGuard:
             # 第一轮（Ctrl+C）没反应，第二轮换 Ctrl+Insert
             seq0 = clipboard_seq()
 
+        # 一次都没读到文本：目标程序没响应 Ctrl+C，我们没留下可确认的
+        # 中间态。此时 _intermediate_seq 保持 None，restore() 会据此
+        # 判断"剪贴板若已变化，那是别人写的，不还原"。
         changed = clipboard_seq() != (self._seq_before or 0)
         return text, {
             "changed": changed,
@@ -334,6 +401,86 @@ class ClipGuard:
         }
 
     # -------- 还原 --------
+
+    def note_self_write(self, text=None):
+        """登记「这次事务自己往剪贴板写了什么」。
+
+        正常路径由 read_text_via_copy 在读到文本后自动调用；调用方若绕过
+        取词、自己往剪贴板写（例如自测里模拟一次复制），必须显式调用它，
+        否则还原时会把这笔写入误判成"第三方插手"。
+
+        参数 text: 我们写进去的文本。传 None 表示"我们写的不是文本"。
+        """
+        self._copy_attempted = True
+        self._intermediate_seq = clipboard_seq()
+        self._intermediate_text = text if text is not None else read_text()
+
+    def _foreign_write_detected(self):
+        """判断剪贴板是否已被第三方改写（而非仍是我们自己写的中间态）。
+
+        返回 (是否被占用, 原因)。这是本模块最关键的安全闸门。
+
+        为什么必须有：restore() 的动作是 EmptyClipboard + 写回旧快照，
+        对剪贴板内容是全量替换。一旦不能确认"现在装着的是我们自己写的
+        中间态"，这个动作就会把用户刚复制的东西或刚截的图整个抹掉。
+
+        线上两个真实故障都源于缺少这一步：
+          · 「复制内容会复制不上」——用户拖选后自己按 Ctrl+C，
+            我们的还原紧随其后，把新内容换回旧内容。
+          · 「截图在剪贴板里找不到」——Win+Shift+S 的拖框本身位移就
+            远超阈值，被当成一次拖选，触发一次事务；截图工具在这 1.3 秒
+            窗口内写入图片，随后的还原把图片 EmptyClipboard 掉。
+
+        判据（任一命中即视为第三方占用，绝不还原）：
+          1. 我们从未确认过自己的中间态，但剪贴板已经变了
+          2. 出现了快照里没有的图片/文件列表格式 —— 我们发的是 Ctrl+C
+             取文本，绝不可能产生这两类格式
+          3. 现在有文本，但我们从没写过文本 —— 必然是别人写的
+          4. 文本内容和我们写进去的不一样
+
+        注意判据里**故意不含"序列号变化"**。目标程序响应我们的 Ctrl+C 时
+        常分批写格式（先 CF_UNICODETEXT，再 CF_HTML/CF_RTF），每写一次
+        序列号就 +1。若把"序列号变了"当成第三方插手的证据，就会把目标
+        程序自己的补写误判掉，于是放弃还原、剪贴板残留我们复制的中间态
+        —— 这同样违反"零污染"。序列号只在"我们压根没有中间态"时用作
+        快速判断（判据 1），有指纹后一律以内容为准。
+
+        残留风险（已知且可接受）：用户若在我们的事务窗口内手动复制了
+        与中间态**逐字相同**的文本，本方法无法区分，会把剪贴板还原成
+        旧内容。文本层面无损（粘出来仍是同一段字），代价是可能丢掉
+        随之而来的富文本格式。该概率极低，而误判两个方向都会造成
+        用户可见的故障，取此权衡。
+        """
+        seq_now = clipboard_seq()
+
+        if self._intermediate_seq is None:
+            # 从未确认过自己的中间态。剪贴板没动 -> 无需还原；
+            # 动了 -> 那是别人写的，我们无权覆盖。
+            if seq_now == self._seq_before:
+                return False, "无中间态"
+            return True, "剪贴板被外部改写（本次复制未产生可确认的中间态）"
+
+        state = _clipboard_state()
+        if state is None:
+            # 读不到状态就无法保证安全。宁可把我们的中间态留在剪贴板，
+            # 也不能冒险冲掉用户的东西。
+            return True, "无法读取剪贴板状态，放弃还原以免覆盖"
+        formats, cur_text, _dib = state
+
+        foreign_imgs = formats & _FOREIGN_IMAGE_FORMATS
+        if foreign_imgs - self._snapshot_formats:
+            names = "、".join(format_name(f)
+                              for f in sorted(foreign_imgs - self._snapshot_formats))
+            return True, f"出现本次复制不会产生的格式（{names}）"
+
+        if cur_text is not None and self._intermediate_text is None:
+            return True, "出现了我们没写过的文本"
+
+        if cur_text is not None and self._intermediate_text is not None \
+                and cur_text != self._intermediate_text:
+            return True, "文本内容已被改写成别的"
+
+        return False, "中间态未被外部改动"
 
     def restore(self):
         if self._restored:
@@ -346,6 +493,15 @@ class ClipGuard:
             seq_now = clipboard_seq()
             if self._seq_before is not None and seq_now == self._seq_before:
                 self.restore_result = (True, "剪贴板未变化，跳过还原")
+                return self.restore_result
+
+            # 关键闸门：只有确认剪贴板里装的还是我们自己的中间态才还原。
+            # 序列号变了绝不等于"该还原"—— 那往往恰恰是"别人写了新东西，
+            # 绝对不能动"。早期版本缺这一步，导致复制和截图都被抹掉。
+            occupied, why = self._foreign_write_detected()
+            if occupied:
+                self.restore_result = (True,
+                                       f"剪贴板已被其他程序更新，保留其内容（{why}）")
                 return self.restore_result
 
             if not _open_clipboard():
@@ -415,23 +571,22 @@ def _selftest():
         return fs
 
     def simulate_copy(text, guard):
-        """模拟「我们触发了一次复制」。
+        """模拟「我们触发了一次复制并读回了文本」。
 
-        必须同时把 _copy_attempted 置 True —— 真实路径里这个标志由
-        read_text_via_copy 设置。少了它，restore() 会在
-        `if not self._copy_attempted` 处直接返回「未触发复制」，
-        完全不还原，于是自测全部失败。
+        必须走 note_self_write 登记中间态指纹 —— 真实路径里这一步由
+        read_text_via_copy 在读到文本后自动完成。少了它，restore() 会认为
+        "我们从未产生可确认的中间态，而剪贴板已经变了"，从而判定被第三方
+        占用、拒绝还原，自测就会全部失败。
 
-        这不是在生产代码里开后门：_copy_attempted 的语义就是
-        「本次事务是否碰过剪贴板」，自测既然写了剪贴板，就该置位。
-        早期版本没置位，导致 [1][3][4] 三项长期假失败，
-        真问题反而被淹没。
+        这不是在生产代码里开后门：note_self_write 的语义就是
+        「本次事务自己往剪贴板写了什么」，自测既然写了剪贴板，就该登记。
+        早期版本没登记，导致 [1][3][4] 三项长期假失败，真问题反而被淹没。
 
         必须显式传入 guard —— 闭包捕获外层同名变量会绑到错误的
         对象上（[3] 的第一版就是这么写的，改的是 g 而不是 g3）。
         """
-        guard._copy_attempted = True
         write_text(text)
+        guard.note_self_write(text)
 
     # 1. 内容还原
     write_text(MARK1)
@@ -487,8 +642,7 @@ def _selftest():
     time.sleep(0.08)
     for i in range(20):
         with ClipGuard() as gi:
-            gi._copy_attempted = True
-            write_text(f"temp_{i}")
+            simulate_copy(f"temp_{i}", gi)
     final = read_text()
     if final == MARK1:
         print("[4] PASS 连续 20 次事务后内容仍一致")
