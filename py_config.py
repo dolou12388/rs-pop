@@ -29,6 +29,17 @@ APP_DIR_NAME = "PopDict"
 CONFIG_NAME = "config.json"
 SECRET_NAME = "secrets.json"
 
+# 浮层字号与内边距的可调范围。
+# 下限 8：再小中文就糊成一团，失去「看得清」的意义。
+# 上限 18：再大按钮会宽到比选中文字还长，浮层喧宾夺主。
+PILL_FONT_MIN, PILL_FONT_MAX = 8, 18
+PILL_FONT_DEFAULT = 10
+
+# 按钮上下内边距（96 DPI 设计像素）。0 会让文字贴边，14 以上又回到
+# 原来那种"上下各空一大截"的松垮感，所以给 0~14。
+PILL_PAD_Y_MIN, PILL_PAD_Y_MAX = 0, 14
+PILL_PAD_Y_DEFAULT = 5
+
 # 搜索与翻译的默认提示词。故意写得简短，用户可在设置里改。
 DEFAULT_PROMPTS = {
     "search": (
@@ -105,6 +116,20 @@ def secret_path():
     return os.path.join(config_dir(), SECRET_NAME)
 
 
+def _clamp_int(value, lo, hi, fallback):
+    """把配置值夹到 [lo, hi] 内的整数；不是数字就用 fallback。
+
+    bool 是 int 的子类，True/False 会被 int() 收成 1/0，对字号来说
+    那是合法但荒谬的值，所以显式排除。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        try:
+            value = int(str(value).strip())
+        except (TypeError, ValueError):
+            return fallback
+    return max(lo, min(hi, int(value)))
+
+
 def default_config():
     """一个新装用户的配置：一个空供应商 + 搜索/翻译都指向它。"""
     return {
@@ -130,6 +155,12 @@ def default_config():
             "pill_ttl_ms": 9000,
             "min_drag_px": 4,
             "theme_mode": "system",
+            # 浮层按钮的文字字号（磅）。浮层贴在光标旁，字号大一点才看得清；
+            # 10 比原先写死的 9 大一档，中文墨迹高约 +3px，仍能保持紧凑。
+            "pill_font_size": PILL_FONT_DEFAULT,
+            # 按钮上下内边距（96 DPI 设计像素）。原来的 8 偏大，中文上下
+            # 各留出一大截空白；5 让按钮高度贴近文字墨迹，观感更紧致。
+            "pill_pad_y": PILL_PAD_Y_DEFAULT,
         },
     }
 
@@ -269,6 +300,15 @@ class ConfigStore:
         ui.setdefault("min_drag_px", 4)
         if ui.get("theme_mode") not in ("system", "light", "dark"):
             ui["theme_mode"] = "system"
+        # 字号与内边距必须夹到合法区间。用户可能在设置界面之外手改了
+        # config.json，越界值会让浮层变得不能用（字号 0 直接量出 0 宽，
+        # 内边距 999 会把浮层撑成一整条），所以在这里兜住而不是只信任写入端。
+        ui["pill_font_size"] = _clamp_int(
+            ui.get("pill_font_size"), PILL_FONT_MIN, PILL_FONT_MAX,
+            PILL_FONT_DEFAULT)
+        ui["pill_pad_y"] = _clamp_int(
+            ui.get("pill_pad_y"), PILL_PAD_Y_MIN, PILL_PAD_Y_MAX,
+            PILL_PAD_Y_DEFAULT)
         cfg["ui"] = ui
 
     # ---------- 供应商 ----------

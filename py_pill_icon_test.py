@@ -109,8 +109,15 @@ def main():
     overlap = [f"#{i}->#{i+1}" for i in range(len(boxes) - 1)
                if boxes[i][1] > boxes[i + 1][0]]
     check("相邻按钮无重叠", not overlap, ",".join(overlap) or "无")
-    check("按钮从左侧内边距开始", boxes[0][0] == py_dpi.px(6),
-          f"x={boxes[0][0]}")
+    # 不再断言具体的 px(6)：间距改由黄金比例体系从字号推导后，
+    # 具体像素会随字号变化，"等于某个定值"是伪约束。
+    # 真正该保证的是左右留白对称、且浮层没有多余空隙。
+    left_pad = boxes[0][0]
+    right_pad = pill.pill_w - boxes[-1][1]
+    check("左右留白对称", abs(left_pad - right_pad) <= 1,
+          f"左 {left_pad} vs 右 {right_pad}")
+    check("左侧留白是正数且不过大", 0 < left_pad <= py_dpi.px(12),
+          f"x={left_pad}")
     check("最后一个按钮未超出浮层右边界",
           boxes[-1][1] <= pill.pill_w, f"右缘 {boxes[-1][1]} <= 宽 {pill.pill_w}")
     check("浮层高度能容纳按钮",

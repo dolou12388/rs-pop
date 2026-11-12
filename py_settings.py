@@ -535,6 +535,53 @@ class SettingsWindow:
         ttk.Button(btns, text="删除", command=self._del_provider).pack(
             side="left")
 
+    def _build_pill_look(self, parent):
+        """浮层外观：字号 + 上下留空。
+
+        放在「功能绑定」之后而不是和主题挤在顶栏 —— 顶栏那几个单选框是
+        「看一眼就知道选哪个」的开关，而字号要边调边看效果，属于需要
+        试的参数，放正文区更合理。
+        """
+        self._section(parent, "浮层外观", pady=(py_dpi.px(14), py_dpi.px(6)))
+        card = ttk.Frame(parent, style="Card.TFrame")
+        card.pack(fill="x")
+
+        row = ttk.Frame(card, style="Card.TFrame")
+        row.pack(fill="x", padx=py_dpi.px(12), pady=py_dpi.px(10))
+
+        ttk.Label(row, text="字号", style="CardDim.TLabel").pack(
+            side="left")
+        self.pill_font_var = tk.StringVar(
+            master=self.root,
+            value=str(self.store.raw["ui"]["pill_font_size"]))
+        sb_font = ttk.Spinbox(
+            row, from_=py_config.PILL_FONT_MIN, to=py_config.PILL_FONT_MAX,
+            textvariable=self.pill_font_var, width=4, font=FONT,
+            command=self._mark_dirty)
+        sb_font.pack(side="left", padx=(py_dpi.px(8), py_dpi.px(6)))
+        # Spinbox 的箭头只在点击时触发 command，手输数字不会 —— 必须
+        # 额外绑 KeyRelease，否则手输后「保存」仍是灰的。
+        sb_font.bind("<KeyRelease>", self._mark_dirty)
+
+        ttk.Label(row, text="磅", style="CardDim.TLabel").pack(
+            side="left", padx=(0, py_dpi.px(20)))
+
+        ttk.Label(row, text="上下留空", style="CardDim.TLabel").pack(
+            side="left")
+        self.pill_pad_var = tk.StringVar(
+            master=self.root,
+            value=str(self.store.raw["ui"]["pill_pad_y"]))
+        sb_pad = ttk.Spinbox(
+            row, from_=py_config.PILL_PAD_Y_MIN,
+            to=py_config.PILL_PAD_Y_MAX,
+            textvariable=self.pill_pad_var, width=4, font=FONT,
+            command=self._mark_dirty)
+        sb_pad.pack(side="left", padx=(py_dpi.px(8), py_dpi.px(6)))
+        sb_pad.bind("<KeyRelease>", self._mark_dirty)
+
+        ttk.Label(row, text="调小更紧凑", style="CardDim.TLabel").pack(
+            side="left")
+
     def _build_right(self, parent):
         """右侧：详情 + 绑定。"""
         wrap = ttk.Frame(parent)
@@ -598,6 +645,8 @@ class SettingsWindow:
                                    borderwidth=0)
         self.prompt_text.pack(fill="x", pady=(py_dpi.px(6), 0))
         self.prompt_text.bind("<<Modified>>", self._on_prompt_edit)
+
+        self._build_pill_look(wrap)
 
         # --- 详情区 ---
         self._section(wrap, "供应商详情", pady=(py_dpi.px(14), py_dpi.px(6)))
@@ -964,6 +1013,15 @@ class SettingsWindow:
             self.store.set_binding(act, prompt=prompt)
 
         self.store.set_ui("theme_mode", self.theme_var.get())
+        # 浮层外观：字号与上下留空。越界值在 ConfigStore._migrate 里还会
+        # 再夹一次，这里先夹是为了让界面输入与落盘值一致（否则用户填 99
+        # 保存后界面仍显示 99，下次打开却变成 18，看着像丢设置）。
+        self.store.set_ui("pill_font_size", py_config._clamp_int(
+            self.pill_font_var.get(), py_config.PILL_FONT_MIN,
+            py_config.PILL_FONT_MAX, py_config.PILL_FONT_DEFAULT))
+        self.store.set_ui("pill_pad_y", py_config._clamp_int(
+            self.pill_pad_var.get(), py_config.PILL_PAD_Y_MIN,
+            py_config.PILL_PAD_Y_MAX, py_config.PILL_PAD_Y_DEFAULT))
 
         if not self.store.save():
             messagebox.showerror("保存失败",

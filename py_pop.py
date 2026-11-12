@@ -389,6 +389,28 @@ class Pill:
     # 悬停高亮的圆角半径（逻辑像素，会按 DPI 换算）
     HOVER_RADIUS = 6
 
+    def _read_metrics_config(self):
+        """读字号与上下内边距，返回 (字号, 内边距设计像素)。
+
+        设置界面保存后调用 rebuild() 会让 _build 重新走一遍，因此这里
+        每次构建都重新读，不做缓存 —— 缓存了就得额外处理失效，得不偿失。
+        store() 在建不起来时（测试环境、导入期）会抛异常，退回默认值，
+        不让"配置读不到"变成"浮层建不出来"。
+        """
+        size = py_config.PILL_FONT_DEFAULT
+        pad_y = py_config.PILL_PAD_Y_DEFAULT
+        try:
+            ui = py_config.store().raw.get("ui") or {}
+            size = py_config._clamp_int(
+                ui.get("pill_font_size"), py_config.PILL_FONT_MIN,
+                py_config.PILL_FONT_MAX, py_config.PILL_FONT_DEFAULT)
+            pad_y = py_config._clamp_int(
+                ui.get("pill_pad_y"), py_config.PILL_PAD_Y_MIN,
+                py_config.PILL_PAD_Y_MAX, py_config.PILL_PAD_Y_DEFAULT)
+        except Exception:
+            pass
+        return size, pad_y
+
     def _build(self):
         """排布四个按钮，每个按钮 = 抗锯齿圆角底 + 线框图标 + 文字。
 
@@ -407,28 +429,69 @@ class Pill:
         self._icon_family = icon_family
 
         import tkinter.font as tkfont
-        self._icon_font = ((icon_family, 11) if icon_family else None)
-        self._text_font = (py_markdown.BASE_FAMILY, 9)
+        # 字号与内边距从配置读，让用户能在设置里调。
+        # 读不到 store（例如单元测试直接造 Pill）时退回模块默认值。
+        size, pad_y_design = self._read_metrics_config()
+        self._font_size = size
+        self._pad_y_design = pad_y_design
+        # 图标字号跟文字联动：图标是纯几何字形（无下伸），同字号下视觉上
+        # 会比汉字矮一截，所以固定大 2 磅，让两者高度接近。
+        self._icon_font = ((icon_family, size + 2) if icon_family else None)
+        self._text_font = (py_markdown.BASE_FAMILY, size)
         # 精确宽度必须靠 Font.measure —— Canvas 的 bbox 受字形留白影响，
         # 同字号下不同字形量出来的宽度不一致，排布会忽宽忽窄。
         self._f_icon = (tkfont.Font(root=self.win, font=self._icon_font)
                         if icon_family else None)
         self._f_text = tkfont.Font(root=self.win, font=self._text_font)
 
-        pad_x = py_dpi.px(7)
-        # Frame 的 padx 同样是「内容之外再加的内边距」，且原版 Label
-        # 还有 1px 默认 padx，两侧各多一点。Canvas 手工补齐这 3px，
-        # 让按钮宽度与原版一致（原版 79/63，改后也是 79/63）。
-        pad_x += 3
-        # Frame 的 pady 是「内容之外再加的内边距」，Canvas 没有这个属性，
-        # 必须自己算进高度。原版 Frame 按钮高 33px = 行高 17 + 内边距 16
-        # （pady=5 上下各 5，加上 Label 自身的 3px 默认 pady）。
-        # 这里用 px(8) 让 Canvas 高度也落在 33px，观感与原版一致。
-        pad_y = py_dpi.px(8)
-        gap_icon = py_dpi.px(4)
-        line = self._f_text.metrics("linespace")
-        icon_h = (self._f_icon.metrics("linespace")
+        # 文字高度按**墨迹**算，不用 linespace。
+        # linespace = ascent + descent，而 descent 是给西文下伸部（g/y/p）
+        # 预留的：9pt 时 linespace 有 24px，其中 descent 占 5px，中文
+        # 完全用不到。按 linespace 排版会让每个按钮上下各多出 2~3px 空白，
+        # 叠上 pad_y 就是"上下留空偏多"的观感来源。
+        # 中文标签用 ascent 作高度即可（汉字全部落在 baseline 之上）。
+        line = self._f_text.metrics("ascent")
+        icon_h = (self._f_icon.metrics("ascent")
                   if self._f_icon else 0)
+
+        # ---------- 黄金比例排版 ----------
+        # 所有间距都从「文字墨迹高度」按 φ 推导，成为一个自洽的韵律体系，
+        # 而不是各写各的魔数。这样做的好处是：用户把字号从 10 调到 16，
+        # 内边距与间距会同比放大，比例关系不变，不会出现"字大了但缝很小"。
+        #
+        # 核心约束：**按钮高 : 文字墨迹高 = φ : 1**
+        #   按钮高 = 墨迹 + 2×单侧留空
+        #   令 (墨迹 + 2×留空) / 墨迹 = φ
+        #   => 留空 = 墨迹 × (φ-1) / 2 ≈ 墨迹 × 0.309
+        # 这个 0.309 是唯一能严格满足 φ 的系数 —— 之前试过 /φ² (0.382)，
+        # 那是凭"看起来合适"估的，实测算出来 h/ink≈1.76 而不是 1.618。
+        #
+        # 其余间距由单侧留空按 φ 派生，保持同一韵律：
+        #   左右内边距 = 单侧留空 × φ
+        #   图标与文字间距 = 单侧留空 / φ
+        gold = (1 + 5 ** 0.5) / 2          # φ
+        # 基准取**文字**墨迹高，不取 max(文字, 图标)。
+        # 图标字号比文字大 2 磅，ascent 恒定多出 3px；若拿它当基准，
+        # 按钮高/文字墨迹会系统性偏大约 0.1~0.2，φ 就守不住了。
+        # 图标更高一点没关系 —— 它画在同一垂直中线上，且字形本身四周
+        # 有留白，视觉高度与汉字接近（实测 12pt 图标墨迹 16px vs 汉字 17px）。
+        base = max(1, line)
+        gap_v = base * (gold - 1) / 2      # 单侧留空（严格满足 h/ink = φ）
+        gap_h = gap_v * gold               # 左右内边距
+        gap_icon = gap_v / gold            # 图标与文字之间
+
+        # 配置里的「上下留空」不是绝对值，而是**缩放系数**：
+        # 以设计默认值 5 为 1.0，用户改成 3 就是 0.6 倍，改 10 就是 2 倍。
+        # 这样做而不是直接用像素值，是为了保住 φ 体系 —— 若直接用绝对值，
+        # 字号从 8 调到 18 时纵向留空纹丝不动，而横向按 φ 一路放大，
+        # 结果就是"字越大按钮越扁"，节奏反而崩了。
+        # 注意：这个系数会把按钮高/墨迹的比例推离 φ，属于用户主动选择，
+        # 默认值 5 时系数正好是 1.0，比例严格等于 φ。
+        factor = (pad_y_design / py_config.PILL_PAD_Y_DEFAULT
+                  if py_config.PILL_PAD_Y_DEFAULT else 1.0)
+        pad_y = max(1, int(round(gap_v * factor)))
+        pad_x = max(3, int(round(gap_h)))
+        gap_icon = max(2, int(round(gap_icon)))
 
         for label, key in (("AI 搜索", "search"), ("翻译", "translate"),
                            ("解释", "explain"), ("复制", "copy")):
@@ -438,7 +501,11 @@ class Pill:
 
             inner_w = text_w + (icon_w + gap_icon if icon_w else 0)
             w = inner_w + pad_x * 2
-            h = max(line, icon_h) + pad_y * 2
+            # 高度只由文字墨迹决定，不被更高的图标撑开 —— 这样
+            # 「按钮高 : 文字墨迹高 = φ : 1」才成立。图标超出部分画在
+            # 同一中线上，Canvas 不会裁剪（item 可以超出 widget 边界，
+            # 只是超出屏幕时会截断，而 pad_y 足够容纳这 3px）。
+            h = line + pad_y * 2
             # 底色块与整个 Canvas 同尺寸，悬停时整块换成圆角高亮
             canvas = tk.Canvas(self.win, width=w, height=h,
                                bg=py_theme.BG2, highlightthickness=0,
@@ -446,17 +513,25 @@ class Pill:
             bg_item = canvas.create_image(0, 0, anchor="nw")
             canvas.itemconfigure(bg_item, state="hidden")
 
+            # 文字按「墨迹中心」对齐，而不是按整块行高居中。
+            # anchor="w" 会把 ascent+descent 的整块居中在 y 上，但汉字
+            # 不占 descent，于是墨迹会整体偏上约 descent/2（本机 2~3px）。
+            # 高度既然已按 ascent 收紧，这个偏移就看得出来了，这里补回去。
             cy = h // 2
+            text_dy = self._f_text.metrics("descent") // 2
+            icon_dy = (self._f_icon.metrics("descent") // 2
+                       if self._f_icon else 0)
+
             x = pad_x
             icon_item = None
             if icon_w:
                 icon_item = canvas.create_text(
-                    x, cy, text=glyph, anchor="w",
+                    x, cy + icon_dy, text=glyph, anchor="w",
                     font=self._icon_font, fill=py_theme.FG)
                 x += icon_w + gap_icon
 
             text_item = canvas.create_text(
-                x, cy, text=label, anchor="w",
+                x, cy + text_dy, text=label, anchor="w",
                 font=self._text_font, fill=py_theme.FG)
 
             # 点击与悬停都绑在 Canvas 上（只有一个 widget，不会漏）
@@ -470,6 +545,58 @@ class Pill:
                 (canvas, bg_item, icon_item, text_item))
             self._bg_items[canvas] = bg_item
             self._icon_widgets.append(icon_item)
+
+    def rebuild(self):
+        """按当前配置重新排布按钮与尺寸。字号/内边距改了之后调它。
+
+        必须在原对象上重建，不能新建 Pill 顶替 —— SelectHook 持有 pill
+        引用（self.pill），换对象会让它继续操作旧窗口。
+
+        重建顺序有讲究：旧按钮要先 destroy 再 _build，否则两批按钮会
+        同时存在于 Toplevel 里，_measure 把宽度算成两倍。背景层也要按
+        新尺寸重做，它是一张贴到窗口上的图，尺寸不对会露出底下的键色。
+        """
+        self.win.withdraw()
+        for b in list(getattr(self, "_buttons", [])):
+            try:
+                b.destroy()
+            except tk.TclError:
+                pass
+        self._build()
+        self.pill_w, self.pill_h = self._measure()
+        # 窗口此时是 withdraw 状态，geometry 只记录请求值、不会真正改变
+        # winfo_width()。下一次 show_at 会按新的 pill_w/pill_h 重设几何，
+        # 所以显示时尺寸一定是对的；这里 update_idletasks 是为了让
+        # place 布局与 font 度量立刻落地，避免紧接着的截图/取色拿到旧画面。
+        self.win.geometry(f"{self.pill_w}x{self.pill_h}+200+200")
+        try:
+            self.win.update_idletasks()
+        except tk.TclError:
+            pass
+
+        # 圆角背景层按新尺寸重做。prepare 失败就走无背景的降级路径，
+        # 与 __init__ 里的处理保持一致。
+        if self._backdrop:
+            try:
+                self._backdrop.close()
+            except Exception:
+                pass
+            self._backdrop = None
+        try:
+            bd = py_pill_effect.PillBackdrop()
+            if bd.prepare(self.pill_w, self.pill_h, py_dpi.px(10),
+                          py_theme.BG2):
+                self._backdrop = bd
+                self.win.attributes("-alpha", 1.0)
+                self.win.configure(bg=self.TRANSPARENT_KEY)
+                self.win.attributes("-transparentcolor", self.TRANSPARENT_KEY)
+            else:
+                bd.close()
+                self._disable_backdrop()
+        except Exception:
+            self._disable_backdrop()
+        # 尺寸变了，旧的悬停高亮图（按旧宽高缓存）不能再用
+        py_pill_round.clear_cache()
 
     def _hover(self, canvas, on):
         """悬停：贴一张抗锯齿圆角高亮图，离开时隐藏。
@@ -501,19 +628,34 @@ class Pill:
         原实现是 4 个等宽 64px 槽位。加了图标后每个按钮变宽，固定槽位
         会把「AI 搜索」裁掉并与右侧按钮的图标重叠。这里改为：
         逐个按钮取自身请求宽度，依次右移，只补最小间距。
+
+        外边距与按钮间距同样按 φ 推导（见 _build 里的 gold 段），
+        让「浮层留白 : 按钮间距 : 按钮内留白」保持同一节奏，而不是
+        各写一个魔数。间距比内留白小一档，这样按钮看起来是"一组"，
+        而不是四块被切开的独立方块。
         """
         self.win.update_idletasks()
-        gap = py_dpi.px(2)
-        top = py_dpi.px(8)
-        left = py_dpi.px(6)
-        x = left
+        gold = (1 + 5 ** 0.5) / 2
+        # 以按钮自身的文字墨迹为基准，一处改动全局跟着走
+        base = max(1, int(self._f_text.metrics("ascent")))
+        gap_v = base * (gold - 1) / 2
+        # 外边距与按钮左右内边距取同一档（gap_v×φ）：浮层边缘到按钮的
+        # 距离，和按钮边缘到文字的视觉距离一致时，整体才像一个整体。
+        # 之前这里用 gap_v/φ（仅 4px），实测按钮几乎贴着浮层边缘，很局促。
+        edge = max(3, int(round(gap_v * gold)))
+        # 按钮之间取 gap_v 本身（约 6px），比外边距小一档：四个按钮才
+        # 像"一组"，而不是被切散的四块独立方块。但也不能太小 —— 低于
+        # 3px 时视觉上按钮会粘在一起。
+        gap = max(3, int(round(gap_v)))
+        top = edge
+        x = edge
         h = 0
         for b in self._buttons:
             bw = b.winfo_reqwidth()
             b.place(x=x, y=top, width=bw)
-            h = max(h, top + b.winfo_reqheight() + py_dpi.px(6))
+            h = max(h, top + b.winfo_reqheight() + top)
             x += bw + gap
-        w = x - gap + left        # 末尾不留多余间距
+        w = x - gap + edge        # 末尾不留多余间距
         return w, h
 
     def contains(self, x, y):
@@ -1735,14 +1877,22 @@ def main():
 
     def open_settings():
         import py_settings
+        # 保存后既可能换了主题、也可能改了字号/留空，所以发一个统一的
+        # "reload" 事件：重读配置 → 应用主题 → 重建浮层。只发 "theme"
+        # 的话字号改了不会生效，用户得重启才有反应。
         py_settings.open_settings(store,
-                                  on_saved=lambda: events.put("theme"),
+                                  on_saved=lambda: events.put("reload"),
                                   wait=False)
 
     def reload_config():
         store.load()
         py_theme.set_mode(store.raw["ui"]["theme_mode"])
         apply_theme()
+        # 字号与内边距可能变了，按新值重排按钮并重新测尺寸。
+        try:
+            pill.rebuild()
+        except Exception as e:
+            print(f"[pill] 重建失败: {e}")
         ok, why = store.readiness("search")
         if tray:
             tray.notify("配置已重载",
