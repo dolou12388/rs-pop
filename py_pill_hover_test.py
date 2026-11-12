@@ -78,6 +78,29 @@ def near(c, target, tol=6):
     return all(abs(c[i] - target[i]) <= tol for i in range(3))
 
 
+def settle(root, hwnd, w, h, probe, want, timeout=3.0):
+    '''等画面真的画到 want 色再返回，最多等 timeout 秒。
+
+    原来是用「固定次数的 update + sleep」等待，机器一忙（比如刚跑完
+    别的测试）首帧就可能还没刷出来，snap() 读到旧像素造成偶发失败。
+    这里改成轮询：反复 update 并采样 probe 点，直到颜色收敛到期望值。
+    调用方拿到的第一帧就是稳定态，测试不再受机器负载影响。
+
+    probe 为 (x, y)，want 为期望 RGB。超时后仍返回最后一帧，让断言
+    自己去失败并打印实际颜色 —— 真出问题时信息比直接抛异常更有用。
+    '''
+    deadline = time.time() + timeout
+    last = None
+    while True:
+        root.update()
+        last = snap(hwnd, w, h)
+        if near(last[probe[1]][probe[0]], want):
+            return last
+        if time.time() >= deadline:
+            return last
+        time.sleep(0.02)
+
+
 def run(theme):
     print()
     print("=" * 66)
@@ -90,6 +113,7 @@ def run(theme):
     import py_pop
     pill = py_pop.Pill(root, lambda k: None)
     pill.show_at(500, 500, "悬停测试")
+    # 先把窗口推出来（等它真的可见），再等首帧画成背景色。
     for _ in range(14):
         root.update()
         time.sleep(0.04)
@@ -107,25 +131,26 @@ def run(theme):
     print(f"  按钮0 区域 ({bx},{by}) {bw}x{bh}   圆角半径 {radius}px")
     print(f"  背景 BG2={py_theme.BG2}  高亮 BG4={py_theme.BG4}")
 
+    # 采样点必须避开文字与图标：居中像素会落在字形上，读到的是抗锯齿
+    # 后的字色（实测出现过 (71,144,198) 这种蓝），造成假失败。
+    # 取按钮底部往里 4px 的中间位置 —— 那里在圆角块内，且没有字。
+    probe_y = by + bh - py_dpi.px(4)
+    probe_x = bx + bw // 2
+
     # --- 悬停前：按钮区域应全是背景色 ---
-    before = snap(hwnd, pill.pill_w, pill.pill_h)
+    before = settle(root, hwnd, pill.pill_w, pill.pill_h,
+                    (bx + 1, by + 1), bg)
     corner_before = before[by + 1][bx + 1]
     check("悬停前角落是背景色", near(corner_before, bg),
           f"{corner_before} vs BG2 {bg}")
 
-    # --- 触发悬停 ---
+    # --- 触发悬停，等内部真的变成高亮色再采样 ---
     pill._hover(canvas, True)
-    for _ in range(8):
-        root.update()
-        time.sleep(0.04)
-    after = snap(hwnd, pill.pill_w, pill.pill_h)
+    after = settle(root, hwnd, pill.pill_w, pill.pill_h,
+                   (probe_x, probe_y), hi)
 
     # --- 1. 形状：角落仍是背景，内部（避开字形）是高亮 ---
     c_corner = after[by + 1][bx + 1]
-    # 采样点必须避开文字与图标：中心像素会落在字形上，导致读到字色。
-    # 取按钮底部往下 3px 的中间位置 —— 那里在圆角块内、且没有字。
-    probe_y = by + bh - py_dpi.px(4)
-    probe_x = bx + bw // 2
     c_mid = after[probe_y][probe_x]
     check("悬停后左上角落仍为背景色（说明是圆角，不是直角）",
           near(c_corner, bg), f"{c_corner} ≈ BG2 {bg}")
@@ -163,10 +188,8 @@ def run(theme):
 
     # --- 3. 离开后恢复 ---
     pill._hover(canvas, False)
-    for _ in range(6):
-        root.update()
-        time.sleep(0.03)
-    restored = snap(hwnd, pill.pill_w, pill.pill_h)
+    restored = settle(root, hwnd, pill.pill_w, pill.pill_h,
+                      (probe_x, probe_y), bg)
     c_after = restored[probe_y][probe_x]
     check("离开后按钮内部恢复背景色", near(c_after, bg),
           f"{c_after} vs BG2 {bg}")
