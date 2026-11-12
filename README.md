@@ -177,6 +177,7 @@ py -3 py_markdown_test.py       :: Markdown 解析
 py -3 py_clipguard.py --test    :: 剪贴板事务
 py -3 py_single_test.py         :: 单实例（必须在子进程里测）
 py -3 py_icon_wire_test.py      :: 图标接线
+py -3 py_ctrlc_test.py          :: 结果窗 Ctrl+C 只复制、不退出（含对照实验）
 ```
 
 全部是自包含脚本，打印 `PASS` / `FAIL` 并返回退出码，不需要 pytest。

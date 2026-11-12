@@ -857,7 +857,15 @@ class ResultWindow:
     def _bind_keys(self):
         self.win.bind("<Escape>", lambda e: self.close())
         self.win.protocol("WM_DELETE_WINDOW", self.close)
-        self.win.bind("<Control-c>", lambda e: self._copy())
+        # 必须 return "break"：Tk 的 bindtags 顺序是 widget -> class ->
+        # toplevel -> all，而 root.bind_all 注册在最后的 all 级。若不阻断，
+        # 复制事件会继续传到全局处理器，把整个程序 quit 掉。
+        # 实测见 py_ctrlc_test.py（A 对照组 copy=1 quit=1，修复后 copy=1 quit=0）。
+        self.win.bind("<Control-c>", self._on_ctrl_c)
+
+    def _on_ctrl_c(self, event=None):
+        self._copy()
+        return "break"
 
     # ---------- 追问输入框 ----------
 
@@ -1703,7 +1711,16 @@ def main():
     except Exception:
         pass
 
-    root.bind_all("<Control-c>", lambda e: root.quit())
+    # 退出只留一条正路：托盘菜单「退出」。
+    #
+    # 这里原来还有一行 `root.bind_all("<Control-c>", lambda e: root.quit())`，
+    # 想在任意位置按 Ctrl+C 都能退出（开发期图方便）。但它注册在 bindtags
+    # 的 all 级 —— 也就是事件传播的最后一站，任何子窗口把自己的
+    # <Control-c> 处理完只要没 return "break"，就会落到这里。
+    #
+    # 后果：在结果窗按 Ctrl+C 复制，复制成功的同时程序整个退出。
+    # 日志里表现为"无任何异常、走完整退出流程"，极难与崩溃区分。
+    # 已删除，别再为了调试方便加回来。回归测试见 py_ctrlc_test.py。
     try:
         root.mainloop()
     finally:
