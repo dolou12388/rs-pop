@@ -75,6 +75,31 @@ def put_dib(w=32, h=32):
         cg.user32.CloseClipboard()
 
 
+def put_same_text_noempty(text):
+    """不清空剪贴板，直接再写一次同内容文本 —— 序列号 +1，内容不变。
+
+    这是目标程序分批写入最忠实的模拟：真实程序补写附加格式时不会
+    EmptyClipboard，只是在已有基础上 SetClipboardData，序列号因此递增。
+    """
+    data = (text + "\0").encode("utf-16-le")
+    hmem = cg.kernel32.GlobalAlloc(cg.GMEM_MOVEABLE, len(data))
+    if not hmem:
+        return False
+    p = cg.kernel32.GlobalLock(hmem)
+    if not p:
+        cg.kernel32.GlobalFree(hmem)
+        return False
+    ctypes.memmove(p, data, len(data))
+    cg.kernel32.GlobalUnlock(hmem)
+    if not cg._open_clipboard():
+        cg.kernel32.GlobalFree(hmem)
+        return False
+    try:
+        return bool(cg.user32.SetClipboardData(cg.CF_UNICODETEXT, hmem))
+    finally:
+        cg.user32.CloseClipboard()
+
+
 def run():
     print("=" * 70)
     print("A. 事务期间用户自己复制 —— 新内容不能被覆盖")
@@ -123,23 +148,34 @@ def run():
 
     print()
     print("=" * 70)
-    print("D. 我们写到一半、目标程序继续分批写格式 —— 不能误判为第三方")
+    print("D. 目标程序分批写格式 —— 登记指纹前 settle，不能被误判为第三方")
     print("=" * 70)
-    # 模拟：我们登记中间态后，剪贴板序列号又变了一次（目标程序补写 CF_HTML）
+    # 真实路径：read_text_via_copy 读到文本后先 _wait_copy_settled() 等序列号
+    # 安静，再登记指纹。所以"登记之后程序还在补写"这种情况不会发生 ——
+    # 补写都已经在 settle 阶段被吸收掉了。
+    #
+    # 这条测试要验的正是这个机制：分批写入后 settle 得到的序列号，
+    # 应当能代表"我们这次复制的最终状态"，之后的还原不被误判。
     cg.write_text("D_原始内容")
+    time.sleep(0.06)
     g4 = cg.ClipGuard()
     g4.__enter__()
+    g4._copy_attempted = True
+    g4._copy_sent = True
+    # 模拟目标程序分批写：先文本
     cg.write_text("D_中间态")
-    g4.note_self_write("D_中间态")
-    # 手动推进序列号，模拟目标程序补写一个附加格式
-    cg.write_text("D_中间态")      # 同内容再写一次 => 序列号+1，内容不变
+    # 再补一批（序列号 +1，内容不变）
+    cg.write_text("D_中间态")
+    # 按真实路径：先 settle 再登记
+    g4._intermediate_seq = cg._wait_copy_settled()
+    g4._intermediate_text = "D_中间态"
+    g4._intermediate_at = time.perf_counter()
     g4.__exit__(None, None, None)
     got4 = cg.read_text()
     print(f"  还原结论: {g4.restore_result}")
     print(f"  最终内容: {got4!r}")
-    check("同内容的重复写入仍被判为我们的中间态并还原",
-          got4 == "D_原始内容",
-          "若留在中间态说明序列号判据过严，会把正常补写误判成第三方")
+    check("分批写入后仍正确还原", got4 == "D_原始内容",
+          f"实际={got4!r}（残留说明 settle 后的序列号仍被误判为第三方）")
 
     print()
     print("=" * 70)
@@ -200,6 +236,61 @@ def run():
     print(f"  最终格式: {n7}")
     check("未发指令时图片完整保留",
           any(x in ("CF_DIB", "CF_DIBV5") for x in n7), f"格式={n7}")
+
+    print()
+    print("=" * 70)
+    print("H. 选词后立即按 Ctrl+C 复制同一段文字 —— 必须保留用户的复制")
+    print("=" * 70)
+    # 线上故障：「选词后立即复制，复制不上」。
+    # 用户复制的正是刚选中的那段文字，与我们的中间态**逐字相同**。
+    # 任何内容比对都识别不出这是新的一次写入，只有序列号能。
+    # 上一版删掉了序列号判据，于是判为"仍是我们的中间态"，
+    # 还原把用户的复制换回旧内容。
+    cg.write_text("H_复制前的旧内容")
+    time.sleep(0.06)
+    g8 = cg.ClipGuard()
+    g8.__enter__()
+    g8._copy_attempted = True
+    g8._copy_sent = True
+    # 我们的 Ctrl+C 让目标程序写入选中文字
+    cg.write_text("H_选中的那段文字")
+    g8._intermediate_seq = cg._wait_copy_settled()
+    g8._intermediate_text = "H_选中的那段文字"
+    g8._intermediate_at = time.perf_counter()
+    # 用户紧接着按 Ctrl+C 复制同一段文字 —— 内容完全相同，只有序列号变
+    time.sleep(0.08)                      # 超过程序补写的时间量级
+    cg.write_text("H_选中的那段文字")
+    g8.__exit__(None, None, None)
+    got8 = cg.read_text()
+    print(f"  还原结论: {g8.restore_result}")
+    print(f"  最终内容: {got8!r}")
+    check("用户的复制结果被保留", got8 == "H_选中的那段文字",
+          f"实际={got8!r}（变回旧内容即「复制不上」）")
+
+    print()
+    print("=" * 70)
+    print("I. 宽限期内目标程序补写 —— 仍要还原，不能一刀切")
+    print("=" * 70)
+    # 与 H 相反：序列号虽变，但发生在宽限窗口内（程序补写格式），
+    # 内容仍是我们的中间态，必须照常还原，否则剪贴板残留。
+    cg.write_text("I_复制前的旧内容")
+    time.sleep(0.06)
+    g9 = cg.ClipGuard()
+    g9.__enter__()
+    g9._copy_attempted = True
+    g9._copy_sent = True
+    cg.write_text("I_中间态")
+    g9._intermediate_seq = cg.clipboard_seq()
+    g9._intermediate_text = "I_中间态"
+    g9._intermediate_at = time.perf_counter()
+    # 立刻补一批（模拟程序紧接着写附加格式，宽限期内）
+    put_same_text_noempty("I_中间态")
+    g9.__exit__(None, None, None)
+    got9 = cg.read_text()
+    print(f"  还原结论: {g9.restore_result}")
+    print(f"  最终内容: {got9!r}")
+    check("宽限期内补写未被误判，仍正确还原", got9 == "I_复制前的旧内容",
+          f"实际={got9!r}（残留说明宽限窗口太短）")
     return 0 if fails == 0 else 1
 
 

@@ -90,6 +90,22 @@ RESTORE_SETTLE_MAX_MS = 120    # 最多等这么久，不能让取词无限期�
 # 还原后自检并重试的次数。写完回读比对，不一致说明被覆盖了，再还原一次。
 RESTORE_VERIFY_ATTEMPTS = 2
 
+# 「序列号变了」的宽限窗口（毫秒）。
+#
+# 登记完中间态之后序列号又变了，有两种可能，必须区分：
+#
+#   a) 目标程序还在补写格式（先 CF_UNICODETEXT，再 CF_HTML / CF_RTF）
+#      —— 通常几十毫秒内完成，此时剪贴板里仍是**我们取到的内容**，
+#      应该照常还原。
+#   b) 用户自己按了 Ctrl+C 复制同一段文字 —— 内容与中间态逐字相同，
+#      任何内容比对都识别不出，只有序列号能体现"这是一次新写入"。
+#      此时绝不能还原，否则表现为「选完词立即复制，复制不上」。
+#
+# 两者内容一样，只能按时间分：程序补写在毫秒级，人从看到浮层到按下
+# 快捷键至少要 150~300ms（反应 + 移指 + 按键）。取 60ms 作分界，
+# 给程序侧留足余量，又远小于任何真实的人工操作。
+RESTORE_SEQ_GRACE_MS = 60
+
 VK_CONTROL = 0x11
 VK_C = 0x43
 VK_INSERT = 0x2D
@@ -288,6 +304,10 @@ class ClipGuard:
         # 以及我们实际写进去的文本。见 _foreign_write_detected()。
         self._intermediate_seq = None
         self._intermediate_text = None
+        # 登记中间态的时刻（perf_counter）。用于区分"目标程序补写格式"
+        # 与"用户自己又复制了一次" —— 二者内容相同，只能靠时间分。
+        # 见 RESTORE_SEQ_GRACE_MS 的说明。
+        self._intermediate_at = None
         # 我们是否**真的发出过** Ctrl+C 指令。这是"剪贴板的变化可能是
         # 我们造成的"的唯一凭据 —— 与"是否成功读到文本"无关。
         # 区分这两件事是本轮修复的关键：目标程序可能写得很晚（我们超时退出
@@ -498,6 +518,7 @@ class ClipGuard:
         self._copy_sent = True
         self._intermediate_seq = clipboard_seq()
         self._intermediate_text = text if text is not None else read_text()
+        self._intermediate_at = time.perf_counter()
 
     def _foreign_write_detected(self):
         """判断剪贴板是否已被**第三方**改写（而非我们自己的动作造成的）。
@@ -527,13 +548,29 @@ class ClipGuard:
         再排除"有证据表明是别人写的"：
 
           1. 我们压根没发过复制指令，剪贴板却变了 → 别人写的
-          2. 出现了快照里没有的图片/文件列表格式 → 我们发的是 Ctrl+C
+          2. 序列号比登记的中间态更新 → 别人又写了一次
+          3. 出现了快照里没有的图片/文件列表格式 → 我们发的是 Ctrl+C
              取文本，不可能产生 CF_DIB / CF_DIBV5 / CF_HDROP
-          3. 有中间态指纹，且文本与指纹不同 → 被换掉了
+          4. 有中间态指纹，且文本与指纹不同 → 被换掉了
 
-        只要不属于以上三种，就认定这仍是我们的中间态并还原。
-        "认领不明确"时倾向于**还原**：还原最多把内容退回原样（无损，
-        用户原内容还在），而不还原必然留下污染。
+        只要不属于以上四种，就认定这仍是我们的中间态并还原。
+
+        ## 为什么判据 2（序列号）不可省
+
+        我一度删掉过它，理由是"目标程序分批写格式会让序列号 +N，
+        据此判为第三方会误伤"。结果引出更严重的故障：
+
+          用户拖选文字 -> 我们取词读到 X、剪贴板里也是 X
+          -> 用户紧接着按 Ctrl+C，复制**同一段文字**，剪贴板里还是 X
+          -> 只看内容：X == X，判为"仍是我们的中间态" -> 还原
+          -> 用户的复制被换回旧内容，表现为「选完词立即复制，复制不上」
+
+        文本相同时，内容比对天然无法区分"我们写的那一次"和"用户又写的一次"，
+        只有序列号能体现后者是一次新的写入。所以判据 2 必须保留。
+
+        分批写入的误伤问题改由 `_wait_copy_settled()` 解决：登记指纹前
+        先等序列号安静（35ms 无变化），把目标程序的多个批次并成一次，
+        之后序列号再变就确实是别人写的。
         """
         seq_now = clipboard_seq()
 
@@ -543,6 +580,24 @@ class ClipGuard:
         # 我们没发过复制指令，剪贴板却变了 —— 完全是别人的动作。
         if not self._copy_sent and self._intermediate_seq is None:
             return True, "本次未发出复制指令，剪贴板却被改动"
+
+        # 判据 2：序列号比我们的中间态更新 —— 有人在我们之后又写了一次。
+        #
+        # 但"序列号变了"本身不足以定罪，因为目标程序补写格式也会让它变。
+        # 区别在于内容：
+        #   · 内容仍等于我们登记的中间态 -> 是程序补写，照常还原
+        #   · 内容与我们登记的相同、但已过去很久 -> 是用户又复制了一次
+        #     （用户复制的往往就是同一段选中的文字，逐字相同）
+        # 时间分界见 RESTORE_SEQ_GRACE_MS。
+        if self._intermediate_seq is not None \
+                and seq_now != self._intermediate_seq:
+            elapsed_ms = 0.0
+            if self._intermediate_at is not None:
+                elapsed_ms = (time.perf_counter() - self._intermediate_at) * 1000
+            if elapsed_ms >= RESTORE_SEQ_GRACE_MS:
+                return True, (f"序列号已更新且距上次写入 {elapsed_ms:.0f}ms，"
+                              f"判定为外部新写入")
+            # 宽限期内：仍视为目标程序在补写格式，继续走内容核对
 
         state = _clipboard_state()
         if state is None:
