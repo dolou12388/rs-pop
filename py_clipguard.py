@@ -482,8 +482,11 @@ class ClipGuard:
                     if text:
                         # 等序列号安静下来再登记指纹，避免把目标程序后续
                         # 补写的批次当成"第三方插手"。
-                        self._intermediate_seq = _wait_copy_settled()
-                        self._intermediate_text = text
+                        # settle 结束的那一刻就是"目标程序写完了"，因此用
+                        # 它返回的序列号作为中间态指纹，时间基线由
+                        # _note_intermediate 一并写死。
+                        settled = _wait_copy_settled()
+                        self._note_intermediate(text, seq=settled)
                         return text, {
                             "changed": True,
                             "waited_ms": int((time.time() - t0) * 1000),
@@ -506,6 +509,23 @@ class ClipGuard:
 
     # -------- 还原 --------
 
+    def _note_intermediate(self, text=None, seq=None):
+        """登记中间态：序列号 + 文本 + 时间基线，**三者必须同时写**。
+
+        把三件事收进一个方法是有原因的。之前序列号、文本、时间戳散落在
+        两处赋值点上，结果 `read_text_via_copy` 只写了前两个、漏了时间戳，
+        于是 `_foreign_write_detected()` 算出的 elapsed_ms 恒为 0，
+        宽限窗口永远命中，序列号判据彻底失效 —— 单元测试因为手工预置了
+        那个字段而全部通过，真实路径却坏了，直到端到端才暴露。
+
+        集中登记后，调用方无法只写一半。
+        """
+        self._copy_attempted = True
+        self._copy_sent = True
+        self._intermediate_seq = clipboard_seq() if seq is None else seq
+        self._intermediate_text = text if text is not None else read_text()
+        self._intermediate_at = time.perf_counter()
+
     def note_self_write(self, text=None):
         """登记「这次事务自己往剪贴板写了什么」。
 
@@ -514,11 +534,7 @@ class ClipGuard:
 
         参数 text: 我们写进去的文本。传 None 表示"我们写的不是文本"。
         """
-        self._copy_attempted = True
-        self._copy_sent = True
-        self._intermediate_seq = clipboard_seq()
-        self._intermediate_text = text if text is not None else read_text()
-        self._intermediate_at = time.perf_counter()
+        self._note_intermediate(text)
 
     def _foreign_write_detected(self):
         """判断剪贴板是否已被**第三方**改写（而非我们自己的动作造成的）。

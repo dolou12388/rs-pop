@@ -167,9 +167,7 @@ def run():
     # 再补一批（序列号 +1，内容不变）
     cg.write_text("D_中间态")
     # 按真实路径：先 settle 再登记
-    g4._intermediate_seq = cg._wait_copy_settled()
-    g4._intermediate_text = "D_中间态"
-    g4._intermediate_at = time.perf_counter()
+    g4._note_intermediate("D_中间态", seq=cg._wait_copy_settled())
     g4.__exit__(None, None, None)
     got4 = cg.read_text()
     print(f"  还原结论: {g4.restore_result}")
@@ -252,11 +250,11 @@ def run():
     g8.__enter__()
     g8._copy_attempted = True
     g8._copy_sent = True
-    # 我们的 Ctrl+C 让目标程序写入选中文字
+    # 我们的 Ctrl+C 让目标程序写入选中文字。
+    # 走 _note_intermediate 而不是手写三个字段 —— 端到端就是这样暴露的：
+    # 手写能让测试通过，真实路径漏设 _intermediate_at 就会失效。
     cg.write_text("H_选中的那段文字")
-    g8._intermediate_seq = cg._wait_copy_settled()
-    g8._intermediate_text = "H_选中的那段文字"
-    g8._intermediate_at = time.perf_counter()
+    g8._note_intermediate("H_选中的那段文字", seq=cg._wait_copy_settled())
     # 用户紧接着按 Ctrl+C 复制同一段文字 —— 内容完全相同，只有序列号变
     time.sleep(0.08)                      # 超过程序补写的时间量级
     cg.write_text("H_选中的那段文字")
@@ -280,9 +278,7 @@ def run():
     g9._copy_attempted = True
     g9._copy_sent = True
     cg.write_text("I_中间态")
-    g9._intermediate_seq = cg.clipboard_seq()
-    g9._intermediate_text = "I_中间态"
-    g9._intermediate_at = time.perf_counter()
+    g9._note_intermediate("I_中间态")
     # 立刻补一批（模拟程序紧接着写附加格式，宽限期内）
     put_same_text_noempty("I_中间态")
     g9.__exit__(None, None, None)
@@ -291,6 +287,51 @@ def run():
     print(f"  最终内容: {got9!r}")
     check("宽限期内补写未被误判，仍正确还原", got9 == "I_复制前的旧内容",
           f"实际={got9!r}（残留说明宽限窗口太短）")
+
+    print()
+    print("=" * 70)
+    print("J. 真实取词路径必须登记时间基线 —— 不能只靠测试手工预置")
+    print("=" * 70)
+    # 这一条是端到端抓出来的缺陷的回归。
+    #
+    # H 用手工赋值构造中间态，所以即使 read_text_via_copy 漏写
+    # _intermediate_at 也照样通过 —— 单测绿、真实路径却失效：
+    # elapsed_ms 恒为 0，宽限窗口永远命中，序列号判据形同虚设。
+    #
+    # 无头环境里发 Ctrl+C 打不到控件、取不到文本，无法走通真实路径，
+    # 因此这里做源码级检查：读到文本之后必须调用 _note_intermediate
+    # （它一次性写序列号 + 文本 + 时间基线，无法只写一半）。
+    import inspect
+    import re
+    src = inspect.getsource(cg.ClipGuard.read_text_via_copy)
+    # 去掉注释和字符串，避免注释里提到方法名造成误判
+    code = re.sub(r"#.*", "", src)
+    code = re.sub(r'"""[\s\S]*?"""', "", code)
+    uses_note = "_note_intermediate(" in code
+    manual_at = bool(re.search(r"_intermediate_at\s*=", code))
+    manual_seq = bool(re.search(r"_intermediate_seq\s*=", code))
+    print(f"  调用 _note_intermediate: {uses_note}")
+    print(f"  手工赋值 _intermediate_at: {manual_at}"
+          f"  手工赋值 _intermediate_seq: {manual_seq}")
+    check("真实路径通过 _note_intermediate 一次性登记", uses_note,
+          "必须调用它，否则可能漏写时间基线导致序列号判据失效")
+    check("真实路径不再手工拆开赋中间态字段",
+          not manual_at and not manual_seq,
+          "手工拆写正是本次漏设 _intermediate_at 的成因")
+
+    # 同时验证登记方法本身确实把三件套都写上了
+    g11 = cg.ClipGuard()
+    g11.__enter__()
+    g11._note_intermediate("J_验证")
+    trio_ok = (g11._intermediate_seq is not None
+               and g11._intermediate_text == "J_验证"
+               and g11._intermediate_at is not None)
+    print(f"  三件套: seq={g11._intermediate_seq is not None}"
+          f" text={g11._intermediate_text!r}"
+          f" at={g11._intermediate_at is not None}")
+    check("_note_intermediate 同时写入三件套", trio_ok)
+    g11.__exit__(None, None, None)
+
     return 0 if fails == 0 else 1
 
 
